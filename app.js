@@ -29,7 +29,7 @@ contract FairMintTokenV1 is ERC20, Ownable, Pausable, ReentrancyGuard {
     enum MintMode { BNB, USDT }
     enum LaunchMode { MANUAL, TIME, AUTO }
     uint256 public constant DENOMINATOR = 10000;
-    uint256 public constant MAX_TAX = 1000;
+    uint256 public constant MAX_TAX = 500;
     MintMode public mintMode;
     LaunchMode public launchMode;
     address public usdtAddress;
@@ -67,6 +67,9 @@ contract FairMintTokenV1 is ERC20, Ownable, Pausable, ReentrancyGuard {
     address public deadWallet;
     bool public swapEnabled = true;
     bool private inSwap;
+    bool public taxesLocked;
+    bool public feeExemptionsLocked;
+    bool public pauseDisabledForever;
     uint256 public swapThreshold;
     uint256 public pendingTaxTokens;
     uint256 public tokenDividendPerShare;
@@ -98,7 +101,7 @@ contract FairMintTokenV1 is ERC20, Ownable, Pausable, ReentrancyGuard {
         require(owner_ != address(0), "owner zero");
         require(userMintShare_ <= DENOMINATOR, "bad user share");
         require(lpFundShare_ <= DENOMINATOR, "bad lp fund share");
-        require(buyTax_ <= MAX_TAX && sellTax_ <= MAX_TAX && transferTax_ <= MAX_TAX, "tax > 10%");
+        require(buyTax_ <= MAX_TAX && sellTax_ <= MAX_TAX && transferTax_ <= MAX_TAX, "tax > 5%");
         require(marketingShare_ + burnShare_ + lpShare_ + dividendShare_ == DENOMINATOR, "sum != 10000");
         if (buyLimitEnabled_) require(maxBuyAmountPerWallet_ > 0, "buy limit zero");
         if (mintMode_ == MintMode.USDT) require(usdtAddress_ != address(0), "usdt zero");
@@ -181,7 +184,7 @@ contract FairMintTokenV1 is ERC20, Ownable, Pausable, ReentrancyGuard {
         uint256 totalShare = marketingShare + burnShare + lpShare + dividendShare; if (totalShare == 0 || tokenAmount == 0) return;
         if (tokenAmount > pendingTaxTokens) tokenAmount = pendingTaxTokens;
         if (tokenAmount == 0) return;
-        if (tokenAmount > swapThreshold * 20) tokenAmount = swapThreshold * 20;
+        if (tokenAmount > swapThreshold * 5) tokenAmount = swapThreshold * 5;
         pendingTaxTokens -= tokenAmount;
         uint256 burnTokens = tokenAmount * burnShare / totalShare;
         uint256 lpTokens = tokenAmount * lpShare / totalShare;
@@ -287,27 +290,30 @@ contract FairMintTokenV1 is ERC20, Ownable, Pausable, ReentrancyGuard {
     function setWhitelistEnabled(bool v) external onlyOwner { whitelistEnabled = v; }
     function setWhitelist(address user, bool v) external onlyOwner { whitelist[user] = v; }
     function batchSetWhitelist(address[] calldata users, bool v) external onlyOwner { for (uint i; i < users.length; i++) whitelist[users[i]] = v; }
-    function setExcludedFromFee(address user, bool v) external onlyOwner { isExcludedFromFee[user] = v; }
+    function setExcludedFromFee(address user, bool v) external onlyOwner { require(!feeExemptionsLocked, "fee exemptions locked"); isExcludedFromFee[user] = v; }
     function setBuyLimitEnabled(bool v) external onlyOwner { buyLimitEnabled = v; }
     function setMaxBuyAmountPerWallet(uint256 v) external onlyOwner { maxBuyAmountPerWallet = v; }
     function setMinTokenDividendBalance(uint256 v) external onlyOwner { minTokenDividendBalance = v; }
     function setAutoDividendEnabled(bool v) external onlyOwner { autoDividendEnabled = v; }
     function setAutoDividendBatchSize(uint256 v) external onlyOwner { require(v > 0 && v <= 20, "bad batch"); autoDividendBatchSize = v; }
-    function setBuyTax(uint256 v) external onlyOwner { require(v <= MAX_TAX, "tax > 10%"); buyTax = v; }
-    function setSellTax(uint256 v) external onlyOwner { require(v <= MAX_TAX, "tax > 10%"); sellTax = v; }
-    function setTransferTax(uint256 v) external onlyOwner { require(v <= MAX_TAX, "tax > 10%"); transferTax = v; }
-    function setTaxShares(uint256 marketing, uint256 burn, uint256 lp, uint256 dividend) external onlyOwner { require(marketing + burn + lp + dividend == DENOMINATOR, "sum != 10000"); marketingShare = marketing; burnShare = burn; lpShare = lp; dividendShare = dividend; }
-    function setMarketingShare(uint256 v) external onlyOwner { marketingShare = v; _checkShares(); }
-    function setBurnShare(uint256 v) external onlyOwner { burnShare = v; _checkShares(); }
-    function setLPShare(uint256 v) external onlyOwner { lpShare = v; _checkShares(); }
-    function setDividendShare(uint256 v) external onlyOwner { dividendShare = v; _checkShares(); }
+    function lockTaxes() external onlyOwner { taxesLocked = true; }
+    function lockFeeExemptions() external onlyOwner { feeExemptionsLocked = true; }
+    function disablePauseForever() external onlyOwner { pauseDisabledForever = true; }
+    function setBuyTax(uint256 v) external onlyOwner { require(!taxesLocked, "taxes locked"); require(v <= MAX_TAX, "tax > 5%"); buyTax = v; }
+    function setSellTax(uint256 v) external onlyOwner { require(!taxesLocked, "taxes locked"); require(v <= MAX_TAX, "tax > 5%"); sellTax = v; }
+    function setTransferTax(uint256 v) external onlyOwner { require(!taxesLocked, "taxes locked"); require(v <= MAX_TAX, "tax > 5%"); transferTax = v; }
+    function setTaxShares(uint256 marketing, uint256 burn, uint256 lp, uint256 dividend) external onlyOwner { require(!taxesLocked, "taxes locked"); require(marketing + burn + lp + dividend == DENOMINATOR, "sum != 10000"); marketingShare = marketing; burnShare = burn; lpShare = lp; dividendShare = dividend; }
+    function setMarketingShare(uint256 v) external onlyOwner { require(!taxesLocked, "taxes locked"); marketingShare = v; _checkShares(); }
+    function setBurnShare(uint256 v) external onlyOwner { require(!taxesLocked, "taxes locked"); burnShare = v; _checkShares(); }
+    function setLPShare(uint256 v) external onlyOwner { require(!taxesLocked, "taxes locked"); lpShare = v; _checkShares(); }
+    function setDividendShare(uint256 v) external onlyOwner { require(!taxesLocked, "taxes locked"); dividendShare = v; _checkShares(); }
     function _checkShares() internal view { require(marketingShare + burnShare + lpShare + dividendShare == DENOMINATOR, "sum != 10000"); }
     function setMarketingWallet(address v) external onlyOwner { require(v != address(0), "zero"); marketingWallet = v; }
     function setRewardToken(address v) external onlyOwner { require(dividendReserve == 0, "reserve not empty"); require(v != address(this), "bad reward token"); rewardToken = v; }
     function setDeadWallet(address v) external onlyOwner { require(v != address(0), "zero"); deadWallet = v; }
     function setSwapEnabled(bool v) external onlyOwner { swapEnabled = v; }
     function setSwapThreshold(uint256 v) external onlyOwner { swapThreshold = v; }
-    function pause() external onlyOwner { _pause(); }
+    function pause() external onlyOwner { require(!pauseDisabledForever, "pause disabled"); require(!tradingOpen, "trading open"); _pause(); }
     function unpause() external onlyOwner { _unpause(); }
     function withdrawBNB(uint256 amount) external onlyOwner { uint256 bal = address(this).balance; uint256 locked = _isNativeReward() ? dividendReserve : 0; require(bal > locked, "no available BNB"); uint256 available = bal - locked; uint256 toSend = amount == 0 ? available : amount; require(toSend <= available, "exceeds available"); payable(owner()).transfer(toSend); }
     function withdrawToken(address token, uint256 amount) external onlyOwner { IERC20 erc = IERC20(token); uint256 bal = erc.balanceOf(address(this)); uint256 locked = (!_isNativeReward() && token == rewardTokenAddress()) ? dividendReserve : 0; require(bal > locked, "no available token"); uint256 available = bal - locked; uint256 toSend = amount == 0 ? available : amount; require(toSend <= available, "exceeds available"); erc.safeTransfer(owner(), toSend); }
@@ -1090,14 +1096,16 @@ async function refreshAdmin() {
   const [
     owner, pair, mintMode, mintPrice, tokenPerMint, mintedCount, maxMintCount, mintEnabled, tradingOpen,
     buyTax, sellTax, transferTax, marketingShare, burnShare, lpShare, dividendShare, marketingWallet, swapThreshold, dividendReserve,
-    buyLimitEnabled, maxBuyAmountPerWallet, minTokenDividendBalance, autoDividendEnabled, autoDividendBatchSize, dividendHolderCount
+    buyLimitEnabled, maxBuyAmountPerWallet, minTokenDividendBalance, autoDividendEnabled, autoDividendBatchSize, dividendHolderCount,
+    taxesLocked, feeExemptionsLocked, pauseDisabledForever
   ] = await Promise.all([
     state.admin.owner(), state.admin.pair(), state.admin.mintMode(), state.admin.mintPrice(), state.admin.tokenPerMint(),
     state.admin.mintedCount(), state.admin.maxMintCount(), state.admin.mintEnabled(), state.admin.tradingOpen(),
     state.admin.buyTax(), state.admin.sellTax(), state.admin.transferTax(), state.admin.marketingShare(),
     state.admin.burnShare(), state.admin.lpShare(), state.admin.dividendShare(), state.admin.marketingWallet(), state.admin.swapThreshold(),
     state.admin.dividendReserve(), state.admin.buyLimitEnabled(), state.admin.maxBuyAmountPerWallet(), state.admin.minTokenDividendBalance(),
-    state.admin.autoDividendEnabled(), state.admin.autoDividendBatchSize(), state.admin.dividendHolderCount()
+    state.admin.autoDividendEnabled(), state.admin.autoDividendBatchSize(), state.admin.dividendHolderCount(),
+    state.admin.taxesLocked(), state.admin.feeExemptionsLocked(), state.admin.pauseDisabledForever()
   ]);
   renderStats("adminStats", [
     ["Owner", owner], ["Pair", pair], ["Mint 模式", Number(mintMode) === 0 ? "BNB" : "USDT"],
@@ -1109,7 +1117,9 @@ async function refreshAdmin() {
     ["Swap 阈值", ethers.formatUnits(swapThreshold, 18)], ["分红储备", `${ethers.formatUnits(dividendReserve, reward.decimals)} ${reward.symbol}`],
     ["买入限购", buyLimitEnabled ? "开启" : "关闭"], ["单钱包限购", ethers.formatUnits(maxBuyAmountPerWallet, 18)],
     ["分红最低持仓", ethers.formatUnits(minTokenDividendBalance, 18)],
-    ["自动分红", autoDividendEnabled ? `开启 / 每次 ${autoDividendBatchSize}` : "关闭"], ["分红地址数", dividendHolderCount]
+    ["自动分红", autoDividendEnabled ? `开启 / 每次 ${autoDividendBatchSize}` : "关闭"], ["分红地址数", dividendHolderCount],
+    ["税锁定", taxesLocked ? "已锁定" : "未锁定"], ["免税锁定", feeExemptionsLocked ? "已锁定" : "未锁定"],
+    ["暂停权限", pauseDisabledForever ? "永久禁用" : (tradingOpen ? "交易已开，不能暂停" : "可暂停")]
   ]);
 }
 
@@ -1152,14 +1162,17 @@ async function adminAction(action) {
     closeMint: () => c.closeMint(),
     pause: () => c.pause(),
     unpause: () => c.unpause(),
+    disablePauseForever: () => c.disablePauseForever(),
     setWhitelistEnabled: () => c.setWhitelistEnabled(parseBool($("whitelistEnabled").value)),
     setWhitelist: () => c.setWhitelist(listAddress, listValue),
     batchSetWhitelist: () => c.batchSetWhitelist(parseAddressList($("batchListAddresses").value), listValue),
     setExcludedFromFee: () => c.setExcludedFromFee(listAddress, listValue),
+    lockFeeExemptions: () => c.lockFeeExemptions(),
     setBuyTax: () => c.setBuyTax(BigInt($("buyTax").value)),
     setSellTax: () => c.setSellTax(BigInt($("sellTax").value)),
     setTransferTax: () => c.setTransferTax(BigInt($("transferTax").value)),
     setTaxShares: () => c.setTaxShares(BigInt($("marketingShare").value), BigInt($("burnShare").value), BigInt($("lpShare").value), BigInt($("dividendShare").value)),
+    lockTaxes: () => c.lockTaxes(),
     setMarketingWallet: () => c.setMarketingWallet($("marketingWallet").value.trim()),
     setRewardToken: () => c.setRewardToken($("rewardTokenAdmin").value.trim() || ZERO),
     setSwapThreshold: () => c.setSwapThreshold(parseToken($("swapThreshold").value)),
