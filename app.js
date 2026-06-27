@@ -24,6 +24,11 @@ interface IPancakeFactoryV2 {
     function createPair(address tokenA, address tokenB) external returns (address pair);
 }
 
+interface IPancakePairV2 {
+    function token0() external view returns (address);
+    function getReserves() external view returns (uint112 reserve0, uint112 reserve1, uint32 blockTimestampLast);
+}
+
 contract FairMintTokenV1 is ERC20, Ownable, Pausable, ReentrancyGuard {
     using SafeERC20 for IERC20;
     enum MintMode { BNB, USDT }
@@ -55,6 +60,11 @@ contract FairMintTokenV1 is ERC20, Ownable, Pausable, ReentrancyGuard {
     mapping(address => uint256) public boughtAmount;
     bool public buyLimitEnabled;
     uint256 public maxBuyAmountPerWallet;
+    mapping(address => uint256) public boughtBaseAmount;
+    bool public buyAmountLimitEnabled;
+    uint256 public maxBuyBaseAmountPerWallet;
+    bool public buyWhitelistEnabled;
+    mapping(address => bool) public buyWhitelist;
     uint256 public buyTax;
     uint256 public sellTax;
     uint256 public transferTax;
@@ -94,7 +104,7 @@ contract FairMintTokenV1 is ERC20, Ownable, Pausable, ReentrancyGuard {
     event DividendClaimed(address indexed user, uint256 tokenReward, uint256 lpReward);
     event AutoDividendProcessed(uint256 processed, uint256 paid);
     modifier lockSwap() { inSwap = true; _; inSwap = false; }
-    constructor(string memory name_, string memory symbol_, uint256 totalSupply_, MintMode mintMode_, address usdtAddress_, address router_, uint256 mintPrice_, uint256 tokenPerMint_, uint256 maxMintCount_, uint256 userMintShare_, uint256 lpFundShare_, LaunchMode launchMode_, uint256 launchTime_, address marketingWallet_, address owner_, address rewardToken_, uint256 buyTax_, uint256 sellTax_, uint256 transferTax_, uint256 marketingShare_, uint256 burnShare_, uint256 lpShare_, uint256 dividendShare_, bool buyLimitEnabled_, uint256 maxBuyAmountPerWallet_, uint256 minTokenDividendBalance_) ERC20(name_, symbol_) Ownable(owner_) {
+    constructor(string memory name_, string memory symbol_, uint256 totalSupply_, MintMode mintMode_, address usdtAddress_, address router_, uint256 mintPrice_, uint256 tokenPerMint_, uint256 maxMintCount_, uint256 userMintShare_, uint256 lpFundShare_, LaunchMode launchMode_, uint256 launchTime_, address marketingWallet_, address owner_, address rewardToken_, uint256 buyTax_, uint256 sellTax_, uint256 transferTax_, uint256 marketingShare_, uint256 burnShare_, uint256 lpShare_, uint256 dividendShare_, bool buyLimitEnabled_, uint256 maxBuyAmountPerWallet_, uint256 minTokenDividendBalance_, bool buyAmountLimitEnabled_, uint256 maxBuyBaseAmountPerWallet_, bool buyWhitelistEnabled_) ERC20(name_, symbol_) Ownable(owner_) {
         require(totalSupply_ > 0, "totalSupply zero");
         require(router_ != address(0), "router zero");
         require(marketingWallet_ != address(0), "marketing zero");
@@ -104,6 +114,7 @@ contract FairMintTokenV1 is ERC20, Ownable, Pausable, ReentrancyGuard {
         require(buyTax_ <= MAX_TAX && sellTax_ <= MAX_TAX && transferTax_ <= MAX_TAX, "tax > 5%");
         require(marketingShare_ + burnShare_ + lpShare_ + dividendShare_ == DENOMINATOR, "sum != 10000");
         if (buyLimitEnabled_) require(maxBuyAmountPerWallet_ > 0, "buy limit zero");
+        if (buyAmountLimitEnabled_) require(maxBuyBaseAmountPerWallet_ > 0, "buy amount limit zero");
         if (mintMode_ == MintMode.USDT) require(usdtAddress_ != address(0), "usdt zero");
         require(rewardToken_ != address(this), "bad reward token");
         if (launchMode_ == LaunchMode.TIME) require(launchTime_ > block.timestamp, "bad launch time");
@@ -128,6 +139,9 @@ contract FairMintTokenV1 is ERC20, Ownable, Pausable, ReentrancyGuard {
         dividendShare = dividendShare_;
         buyLimitEnabled = buyLimitEnabled_;
         maxBuyAmountPerWallet = maxBuyAmountPerWallet_;
+        buyAmountLimitEnabled = buyAmountLimitEnabled_;
+        maxBuyBaseAmountPerWallet = maxBuyBaseAmountPerWallet_;
+        buyWhitelistEnabled = buyWhitelistEnabled_;
         minTokenDividendBalance = minTokenDividendBalance_;
         deadWallet = 0x000000000000000000000000000000000000dEaD;
         address base = mintMode_ == MintMode.BNB ? router.WETH() : usdtAddress_;
@@ -140,6 +154,9 @@ contract FairMintTokenV1 is ERC20, Ownable, Pausable, ReentrancyGuard {
         isExcludedFromFee[owner_] = true;
         isExcludedFromFee[address(this)] = true;
         isExcludedFromFee[router_] = true;
+        buyWhitelist[owner_] = true;
+        buyWhitelist[address(this)] = true;
+        buyWhitelist[router_] = true;
     }
     receive() external payable nonReentrant whenNotPaused { if (msg.sender == address(router)) return; _mintBNB(msg.sender, msg.value); }
     function decimals() public pure override returns (uint8) { return 18; }
@@ -164,6 +181,7 @@ contract FairMintTokenV1 is ERC20, Ownable, Pausable, ReentrancyGuard {
     }
     function _update(address from, address to, uint256 amount) internal override {
         if (from == address(0) || to == address(0)) { super._update(from, to, amount); return; }
+        uint256 grossAmount = amount;
         if (!tradingOpen && launchMode == LaunchMode.TIME && launchTime > 0 && block.timestamp >= launchTime) { tradingOpen = true; emit TradingOpened(block.timestamp); }
         bool exemptLimit = isExcludedFromLimits[from] || isExcludedFromLimits[to];
         if (!tradingOpen && !exemptLimit) revert("trading not open");
@@ -174,8 +192,19 @@ contract FairMintTokenV1 is ERC20, Ownable, Pausable, ReentrancyGuard {
             if (taxRate > 0) taxAmount = amount * taxRate / DENOMINATOR;
         }
         if (taxAmount > 0) { super._update(from, address(this), taxAmount); pendingTaxTokens += taxAmount; amount -= taxAmount; }
+        if (from == pair && buyWhitelistEnabled) require(buyWhitelist[to], "buy whitelist");
         if (buyLimitEnabled && from == pair && !isExcludedFromLimits[to]) { boughtAmount[to] += amount; require(boughtAmount[to] <= maxBuyAmountPerWallet, "buy limit"); }
+        if (buyAmountLimitEnabled && from == pair && !isExcludedFromLimits[to]) { boughtBaseAmount[to] += _baseAmountForBuy(grossAmount); require(boughtBaseAmount[to] <= maxBuyBaseAmountPerWallet, "buy amount limit"); }
         _accrueTokenDividend(from); _accrueTokenDividend(to); super._update(from, to, amount); _settleTokenDividend(from); _settleTokenDividend(to); _trackDividendHolder(from); _trackDividendHolder(to);
+    }
+    function _baseAmountForBuy(uint256 tokenAmountOut) internal view returns (uint256) {
+        IPancakePairV2 mainPair = IPancakePairV2(pair);
+        (uint112 reserve0, uint112 reserve1,) = mainPair.getReserves();
+        bool tokenIs0 = mainPair.token0() == address(this);
+        uint256 reserveOut = tokenIs0 ? uint256(reserve0) : uint256(reserve1);
+        uint256 reserveIn = tokenIs0 ? uint256(reserve1) : uint256(reserve0);
+        require(tokenAmountOut > 0 && tokenAmountOut < reserveOut, "bad buy amount");
+        return reserveIn * tokenAmountOut * 10000 / ((reserveOut - tokenAmountOut) * 9975) + 1;
     }
     function _openTrading() internal { if (!tradingOpen) { tradingOpen = true; mintEnabled = false; emit TradingOpened(block.timestamp); } }
     function openTrading() external onlyOwner { _openTrading(); }
@@ -293,6 +322,11 @@ contract FairMintTokenV1 is ERC20, Ownable, Pausable, ReentrancyGuard {
     function setExcludedFromFee(address user, bool v) external onlyOwner { require(!feeExemptionsLocked, "fee exemptions locked"); isExcludedFromFee[user] = v; }
     function setBuyLimitEnabled(bool v) external onlyOwner { buyLimitEnabled = v; }
     function setMaxBuyAmountPerWallet(uint256 v) external onlyOwner { maxBuyAmountPerWallet = v; }
+    function setBuyAmountLimitEnabled(bool v) external onlyOwner { if (v) require(maxBuyBaseAmountPerWallet > 0, "buy amount limit zero"); buyAmountLimitEnabled = v; }
+    function setMaxBuyBaseAmountPerWallet(uint256 v) external onlyOwner { maxBuyBaseAmountPerWallet = v; }
+    function setBuyWhitelistEnabled(bool v) external onlyOwner { buyWhitelistEnabled = v; }
+    function setBuyWhitelist(address user, bool v) external onlyOwner { require(user != address(0), "zero address"); buyWhitelist[user] = v; }
+    function batchSetBuyWhitelist(address[] calldata users, bool v) external onlyOwner { for (uint i; i < users.length; i++) { require(users[i] != address(0), "zero address"); buyWhitelist[users[i]] = v; } }
     function setMinTokenDividendBalance(uint256 v) external onlyOwner { minTokenDividendBalance = v; }
     function setAutoDividendEnabled(bool v) external onlyOwner { autoDividendEnabled = v; }
     function setAutoDividendBatchSize(uint256 v) external onlyOwner { require(v > 0 && v <= 20, "bad batch"); autoDividendBatchSize = v; }
@@ -623,9 +657,13 @@ function syncTaxShareControls(changedName = null, rawValue = null) {
 function readDeployLimitConfig(form) {
   const config = {
     enabled: parseBool(form.elements.buyLimitEnabled.value),
-    maxAmount: parseToken(form.elements.maxBuyAmountPerWallet.value)
+    maxAmount: parseToken(form.elements.maxBuyAmountPerWallet.value),
+    amountEnabled: parseBool(form.elements.buyAmountLimitEnabled.value),
+    maxBaseAmount: parseToken(form.elements.maxBuyBaseAmountPerWallet.value),
+    whitelistEnabled: parseBool(form.elements.buyWhitelistEnabled.value)
   };
   if (config.enabled && config.maxAmount == 0n) throw new Error("开启限购时，单钱包累计限购代币数必须大于 0。");
+  if (config.amountEnabled && config.maxBaseAmount == 0n) throw new Error("开启金额限购时，单钱包累计限购金额必须大于 0。");
   return config;
 }
 
@@ -664,7 +702,10 @@ async function applyPostDeploySettings(contract, form) {
     ["设置转账税", tax.transferTax, () => contract.setTransferTax(tax.transferTax)],
     ["设置税收分配", 1n, () => contract.setTaxShares(tax.marketingShare, tax.burnShare, tax.lpShare, tax.dividendShare)],
     ["设置限购数量", limit.maxAmount, () => contract.setMaxBuyAmountPerWallet(limit.maxAmount)],
-    ["设置限购开关", limit.enabled ? 1n : 0n, () => contract.setBuyLimitEnabled(limit.enabled)]
+    ["设置限购开关", limit.enabled ? 1n : 0n, () => contract.setBuyLimitEnabled(limit.enabled)],
+    ["设置金额限购", limit.maxBaseAmount, () => contract.setMaxBuyBaseAmountPerWallet(limit.maxBaseAmount)],
+    ["设置金额限购开关", limit.amountEnabled ? 1n : 0n, () => contract.setBuyAmountLimitEnabled(limit.amountEnabled)],
+    ["设置买入白名单开关", limit.whitelistEnabled ? 1n : 0n, () => contract.setBuyWhitelistEnabled(limit.whitelistEnabled)]
   ];
   for (const [label, value, call] of jobs) {
     if (value > 0n) await txDone(await call(), label);
@@ -848,7 +889,10 @@ function deployArgs(form) {
     tax.dividendShare,
     limit.enabled,
     limit.maxAmount,
-    parseToken(fd.get("minTokenDividendBalance"))
+    parseToken(fd.get("minTokenDividendBalance")),
+    limit.amountEnabled,
+    limit.maxBaseAmount,
+    limit.whitelistEnabled
   ];
 }
 
@@ -1097,6 +1141,8 @@ async function refreshAdmin() {
     owner, pair, mintMode, mintPrice, tokenPerMint, mintedCount, maxMintCount, mintEnabled, tradingOpen,
     buyTax, sellTax, transferTax, marketingShare, burnShare, lpShare, dividendShare, marketingWallet, swapThreshold, dividendReserve,
     buyLimitEnabled, maxBuyAmountPerWallet, minTokenDividendBalance, autoDividendEnabled, autoDividendBatchSize, dividendHolderCount,
+    buyAmountLimitEnabled, maxBuyBaseAmountPerWallet,
+    buyWhitelistEnabled,
     taxesLocked, feeExemptionsLocked, pauseDisabledForever
   ] = await Promise.all([
     state.admin.owner(), state.admin.pair(), state.admin.mintMode(), state.admin.mintPrice(), state.admin.tokenPerMint(),
@@ -1105,6 +1151,8 @@ async function refreshAdmin() {
     state.admin.burnShare(), state.admin.lpShare(), state.admin.dividendShare(), state.admin.marketingWallet(), state.admin.swapThreshold(),
     state.admin.dividendReserve(), state.admin.buyLimitEnabled(), state.admin.maxBuyAmountPerWallet(), state.admin.minTokenDividendBalance(),
     state.admin.autoDividendEnabled(), state.admin.autoDividendBatchSize(), state.admin.dividendHolderCount(),
+    state.admin.buyAmountLimitEnabled(), state.admin.maxBuyBaseAmountPerWallet(),
+    state.admin.buyWhitelistEnabled(),
     state.admin.taxesLocked(), state.admin.feeExemptionsLocked(), state.admin.pauseDisabledForever()
   ]);
   renderStats("adminStats", [
@@ -1116,6 +1164,8 @@ async function refreshAdmin() {
     ["分红代币", reward.native ? reward.symbol : `${reward.symbol} ${reward.address}`],
     ["Swap 阈值", ethers.formatUnits(swapThreshold, 18)], ["分红储备", `${ethers.formatUnits(dividendReserve, reward.decimals)} ${reward.symbol}`],
     ["买入限购", buyLimitEnabled ? "开启" : "关闭"], ["单钱包限购", ethers.formatUnits(maxBuyAmountPerWallet, 18)],
+    ["金额限购", buyAmountLimitEnabled ? "开启" : "关闭"], ["单钱包金额上限", `${ethers.formatUnits(maxBuyBaseAmountPerWallet, 18)} ${Number(mintMode) === 0 ? "BNB" : "USDT"}`],
+    ["买入白名单", buyWhitelistEnabled ? "开启" : "关闭"],
     ["分红最低持仓", ethers.formatUnits(minTokenDividendBalance, 18)],
     ["自动分红", autoDividendEnabled ? `开启 / 每次 ${autoDividendBatchSize}` : "关闭"], ["分红地址数", dividendHolderCount],
     ["税锁定", taxesLocked ? "已锁定" : "未锁定"], ["免税锁定", feeExemptionsLocked ? "已锁定" : "未锁定"],
@@ -1166,6 +1216,9 @@ async function adminAction(action) {
     setWhitelistEnabled: () => c.setWhitelistEnabled(parseBool($("whitelistEnabled").value)),
     setWhitelist: () => c.setWhitelist(listAddress, listValue),
     batchSetWhitelist: () => c.batchSetWhitelist(parseAddressList($("batchListAddresses").value), listValue),
+    setBuyWhitelistEnabled: () => c.setBuyWhitelistEnabled(parseBool($("buyWhitelistEnabled").value)),
+    setBuyWhitelist: () => c.setBuyWhitelist(listAddress, listValue),
+    batchSetBuyWhitelist: () => c.batchSetBuyWhitelist(parseAddressList($("batchListAddresses").value), listValue),
     setExcludedFromFee: () => c.setExcludedFromFee(listAddress, listValue),
     lockFeeExemptions: () => c.lockFeeExemptions(),
     setBuyTax: () => c.setBuyTax(BigInt($("buyTax").value)),
@@ -1178,6 +1231,8 @@ async function adminAction(action) {
     setSwapThreshold: () => c.setSwapThreshold(parseToken($("swapThreshold").value)),
     setBuyLimitEnabled: () => c.setBuyLimitEnabled(parseBool($("buyLimitEnabled").value)),
     setMaxBuyAmountPerWallet: () => c.setMaxBuyAmountPerWallet(parseToken($("maxBuyAmountPerWallet").value)),
+    setBuyAmountLimitEnabled: () => c.setBuyAmountLimitEnabled(parseBool($("buyAmountLimitEnabled").value)),
+    setMaxBuyBaseAmountPerWallet: () => c.setMaxBuyBaseAmountPerWallet(parseToken($("maxBuyBaseAmountPerWallet").value)),
     setMinTokenDividendBalance: () => c.setMinTokenDividendBalance(parseToken($("minTokenDividendBalance").value)),
     setAutoDividendEnabled: () => c.setAutoDividendEnabled(parseBool($("autoDividendEnabled").value)),
     setAutoDividendBatchSize: () => c.setAutoDividendBatchSize(BigInt($("autoDividendBatchSize").value)),
@@ -1262,7 +1317,9 @@ const ERROR_TRANSLATIONS = [
   [/not\s*whitelisted/i, "当前钱包不在白名单中，请联系管理员添加"],
   [/insufficient\s*token\s*reserve/i, "合约内代币储备不足以发放"],
   [/trading\s*not\s*open/i, "交易尚未开启"],
-  [/buy\s*limit/i, "超过单钱包买入限额"],
+  [/buy\s*whitelist/i, "当前钱包不在买入白名单中"],
+  [/buy\s*amount\s*limit/i, "超过单钱包累计买入金额限额"],
+  [/buy\s*limit/i, "超过单钱包累计买入代币限额"],
   [/Pausable:\s*paused/i, "合约已暂停"],
   [/Ownable:\s*caller\s*is\s*not\s*the\s*owner/i, "当前钱包不是合约 Owner，无权操作"],
   [/ReentrancyGuard:\s*reentrant\s*call/i, "操作太频繁，请稍后再试"],
