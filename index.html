@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>GOLDLAUNCH 发射台</title>
     <link rel="stylesheet" href="./styles.css" />
-    <script type="module" src="./app.js?v=20260627-buy-whitelist-limit"></script>
+    <script type="module" src="./app.js?v=20260628-prelaunch-whitelist"></script>
   </head>
   <body>
     <div class="shell">
@@ -102,6 +102,7 @@
                 <label>金额限购<select name="buyAmountLimitEnabled"><option value="false">关闭</option><option value="true">开启</option></select></label>
                 <label>单钱包累计限购金额（BNB/USDT）<input name="maxBuyBaseAmountPerWallet" type="number" value="0.1" min="0" step="0.000000000000000001" /></label>
                 <label>买入白名单<select name="buyWhitelistEnabled"><option value="false">关闭</option><option value="true">开启</option></select></label>
+                <label>开盘前买入白名单<select name="preLaunchBuyWhitelistEnabled"><option value="false">关闭</option><option value="true">开启</option></select></label>
               </div>
             </fieldset>
 
@@ -181,12 +182,15 @@
               <h3>名单管理</h3>
               <div class="row"><select id="whitelistEnabled"><option value="true">开启白名单</option><option value="false">关闭白名单</option></select><button data-action="setWhitelistEnabled">保存</button></div>
               <div class="row"><select id="buyWhitelistEnabled"><option value="true">开启买入白名单</option><option value="false">关闭买入白名单</option></select><button data-action="setBuyWhitelistEnabled">保存</button></div>
+              <div class="row"><select id="preLaunchBuyWhitelistEnabled"><option value="true">开启开盘前买入白名单</option><option value="false">关闭开盘前买入白名单</option></select><button data-action="setPreLaunchBuyWhitelistEnabled">保存</button></div>
               <div class="row"><input id="listAddress" placeholder="钱包地址" /><select id="listValue"><option value="true">加入</option><option value="false">移除</option></select></div>
               <button data-action="setWhitelist">白名单</button>
               <button data-action="setBuyWhitelist">买入白名单</button>
+              <button data-action="setPreLaunchBuyWhitelist">开盘前买入白名单</button>
               <textarea id="batchListAddresses" rows="6" placeholder="批量地址，一行一个"></textarea>
               <button data-action="batchSetWhitelist">批量白名单</button>
               <button data-action="batchSetBuyWhitelist">批量买入白名单</button>
+              <button data-action="batchSetPreLaunchBuyWhitelist">批量开盘前买入白名单</button>
               <button data-action="setExcludedFromFee">手续费排除</button>
               <button data-action="lockFeeExemptions">锁定免税名单</button>
             </article>
