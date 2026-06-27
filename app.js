@@ -392,11 +392,11 @@ const ERC20_ABI = [
   "function decimals() view returns (uint8)",
   "function symbol() view returns (string)"
 ];
-const CONSTRUCTOR_TYPES = [
-  "string", "string", "uint256", "uint8", "address", "address", "uint256",
-  "uint256", "uint256", "uint256", "uint256", "uint8", "uint256", "address",
-  "address", "address", "uint256", "uint256", "uint256", "uint256", "uint256", "uint256", "uint256", "bool", "uint256", "uint256"
-];
+function compiledConstructorTypes() {
+  const constructor = state.compiled?.abi?.find((item) => item.type === "constructor");
+  if (!constructor) throw new Error("编译结果中没有找到构造函数。");
+  return constructor.inputs.map((input) => input.type);
+}
 const NETWORK_DEFAULTS = {
   56: {
     name: "BSC 主网",
@@ -862,7 +862,7 @@ async function compileContract() {
     factoryBytecode: "0x" + factory.evm.bytecode.object,
     standardJsonInput: input
   };
-  log(`编译完成，ABI ${contract.abi.length} 项。`);
+  log(`编译完成，ABI ${contract.abi.length} 项，构造参数 ${compiledConstructorTypes().length} 项。`);
   return state.compiled;
 }
 
@@ -917,6 +917,10 @@ async function deployContract(form) {
   setDefaultMarketingWallet();
   applyNetworkDefaults();
   const args = deployArgs(form);
+  const constructorTypes = compiledConstructorTypes();
+  if (constructorTypes.length !== args.length) {
+    throw new Error(`构造参数数量不匹配：合约需要 ${constructorTypes.length} 项，网页生成 ${args.length} 项，请刷新后重新编译。`);
+  }
   const vanity = readVanityConfig(form);
   let contract;
   let address;
@@ -932,7 +936,7 @@ async function deployContract(form) {
     await deployedFactory.waitForDeployment();
     factoryAddress = await deployedFactory.getAddress();
     log(`工厂部署完成：${factoryAddress}`);
-    const encodedArgs = ethers.AbiCoder.defaultAbiCoder().encode(CONSTRUCTOR_TYPES, args).slice(2);
+    const encodedArgs = ethers.AbiCoder.defaultAbiCoder().encode(constructorTypes, args).slice(2);
     const initCode = state.compiled.bytecode + encodedArgs;
     log(`开始计算合约尾号：${vanity.suffix}`);
     const found = await findCreate2Salt(factoryAddress, initCode, vanity.suffix);
@@ -953,7 +957,7 @@ async function deployContract(form) {
     await contract.waitForDeployment();
     address = await contract.getAddress();
   }
-  const constructorArgs = ethers.AbiCoder.defaultAbiCoder().encode(CONSTRUCTOR_TYPES, args).slice(2);
+  const constructorArgs = ethers.AbiCoder.defaultAbiCoder().encode(constructorTypes, args).slice(2);
   const deploymentInfo = {
     contractAddress: address,
     contractName: "FairMintTokenV1.sol:FairMintTokenV1",
