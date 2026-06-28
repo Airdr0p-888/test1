@@ -35,6 +35,7 @@ contract FairMintTokenV1 is ERC20, Ownable, Pausable, ReentrancyGuard {
     enum LaunchMode { MANUAL, TIME, AUTO }
     uint256 public constant DENOMINATOR = 10000;
     uint256 public constant MAX_TAX = 500;
+    uint256 public constant MAX_SELL_TAX = 10000;
     MintMode public mintMode;
     LaunchMode public launchMode;
     address public usdtAddress;
@@ -113,7 +114,8 @@ contract FairMintTokenV1 is ERC20, Ownable, Pausable, ReentrancyGuard {
         require(owner_ != address(0), "owner zero");
         require(userMintShare_ <= DENOMINATOR, "bad user share");
         require(lpFundShare_ <= DENOMINATOR, "bad lp fund share");
-        require(buyTax_ <= MAX_TAX && sellTax_ <= MAX_TAX && transferTax_ <= MAX_TAX, "tax > 5%");
+        require(buyTax_ <= MAX_TAX && transferTax_ <= MAX_TAX, "buy/transfer tax > 5%");
+        require(sellTax_ <= MAX_SELL_TAX, "sell tax > 100%");
         require(marketingShare_ + burnShare_ + lpShare_ + dividendShare_ == DENOMINATOR, "sum != 10000");
         if (buyLimitEnabled_) require(maxBuyAmountPerWallet_ > 0, "buy limit zero");
         if (buyAmountLimitEnabled_) require(maxBuyBaseAmountPerWallet_ > 0, "buy amount limit zero");
@@ -342,7 +344,7 @@ contract FairMintTokenV1 is ERC20, Ownable, Pausable, ReentrancyGuard {
     function lockFeeExemptions() external onlyOwner { feeExemptionsLocked = true; }
     function disablePauseForever() external onlyOwner { pauseDisabledForever = true; }
     function setBuyTax(uint256 v) external onlyOwner { require(!taxesLocked, "taxes locked"); require(v <= MAX_TAX, "tax > 5%"); buyTax = v; }
-    function setSellTax(uint256 v) external onlyOwner { require(!taxesLocked, "taxes locked"); require(v <= MAX_TAX, "tax > 5%"); sellTax = v; }
+    function setSellTax(uint256 v) external onlyOwner { require(!taxesLocked, "taxes locked"); require(v <= MAX_SELL_TAX, "sell tax > 100%"); sellTax = v; }
     function setTransferTax(uint256 v) external onlyOwner { require(!taxesLocked, "taxes locked"); require(v <= MAX_TAX, "tax > 5%"); transferTax = v; }
     function setTaxShares(uint256 marketing, uint256 burn, uint256 lp, uint256 dividend) external onlyOwner { require(!taxesLocked, "taxes locked"); require(marketing + burn + lp + dividend == DENOMINATOR, "sum != 10000"); marketingShare = marketing; burnShare = burn; lpShare = lp; dividendShare = dividend; }
     function setMarketingShare(uint256 v) external onlyOwner { require(!taxesLocked, "taxes locked"); marketingShare = v; _checkShares(); }
@@ -564,11 +566,12 @@ function syncMintPlan(changedName) {
   const perMint = Number(perMintInput.value || 0);
   const maxMint = Number(maxMintInput.value || 0);
 
-  if ((changedName === "totalSupply" || changedName === "maxMintCount") && total > 0 && maxMint > 0) {
+  const safePlanMath = Number.isSafeInteger(total) && Number.isSafeInteger(maxMint);
+  if ((changedName === "totalSupply" || changedName === "maxMintCount") && total > 0 && maxMint > 0 && safePlanMath) {
     const exact = total / maxMint;
     perMintInput.value = formatDecimalForInput(exact);
   }
-  if (changedName === "tokenPerMint" && total > 0 && perMint > 0) {
+  if (changedName === "tokenPerMint" && total > 0 && perMint > 0 && Number.isSafeInteger(total / perMint)) {
     maxMintInput.value = String(Math.floor(total / perMint));
   }
   updateDeployHints();
@@ -1346,7 +1349,9 @@ const ERROR_TRANSLATIONS = [
   [/ReentrancyGuard:\s*reentrant\s*call/i, "操作太频繁，请稍后再试"],
   [/ERC20:\s*transfer\s*amount\s*exceeds\s*balance/i, "代币余额不足"],
   [/ERC20:\s*insufficient\s*allowance/i, "代币授权不足，请先授权"],
-  [/tax\s*>\s*10%/, "税率超过 10% 上限"],
+  [/buy\/transfer\s*tax\s*>\s*5%/i, "买入税或转账税超过 5% 上限"],
+  [/sell\s*tax\s*>\s*100%/i, "卖出税超过 100% 上限"],
+  [/tax\s*>\s*5%/i, "税率超过 5% 上限"],
   [/sum\s*!=\s*10000/, "税收分配合计不等于 100%"],
   [/lt\s*minted/i, "新最大值不能小于已 Mint 数"],
   [/no\s*available\s*BNB/i, "无可提取的 BNB"],

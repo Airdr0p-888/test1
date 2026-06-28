@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>GOLDLAUNCH 发射台</title>
     <link rel="stylesheet" href="./styles.css" />
-    <script type="module" src="./app.js?v=20260628-constructor-types-fix"></script>
+    <script type="module" src="./app.js?v=20260628-sell-tax-supply-limit"></script>
   </head>
   <body>
     <div class="shell">
@@ -45,7 +45,7 @@
               <div class="grid">
                 <label>代币名称<input name="name" value="GOLDLAUNCH" required /></label>
                 <label>代币符号<input name="symbol" value="GOLD" required /></label>
-                <label>总供应量 <small style="color:#D4A017;font-weight:400">（本平台总供应量限制1-100）</small><input name="totalSupply" type="number" value="100" min="1" max="100" oninput="if(+this.value>100)this.value=100;if(+this.value<1)this.value=1" required /></label>
+                <label>总供应量<input name="totalSupply" type="text" inputmode="decimal" value="100" pattern="(?:0|[1-9]\d*)(?:\.\d{1,18})?" title="请输入普通数字，最多18位小数，不要使用科学计数法" required /></label>
               </div>
             </fieldset>
 
@@ -74,7 +74,7 @@
               <legend>税率</legend>
               <div class="grid">
                 <label>买入税 %<input name="buyTax" type="number" value="0" min="0" max="5" step="0.01" required /></label>
-                <label>卖出税 %<input name="sellTax" type="number" value="0" min="0" max="5" step="0.01" required /></label>
+                <label>卖出税 %<input name="sellTax" type="number" value="0" min="0" max="100" step="0.01" required /></label>
                 <label>转账税 %<input name="transferTax" type="number" value="0" min="0" max="5" step="0.01" required /></label>
               </div>
             </fieldset>
@@ -198,7 +198,7 @@
             <article>
               <h3>税率与分配</h3>
               <div class="row"><input id="buyTax" placeholder="买税 BP" /><button data-action="setBuyTax">设置买税</button></div>
-              <div class="row"><input id="sellTax" placeholder="卖税 BP" /><button data-action="setSellTax">设置卖税</button></div>
+              <div class="row"><input id="sellTax" placeholder="卖税 BP，最高10000" /><button data-action="setSellTax">设置卖税</button></div>
               <div class="row"><input id="transferTax" placeholder="转账税 BP" /><button data-action="setTransferTax">设置转账税</button></div>
               <div class="row four"><input id="marketingShare" placeholder="营销 BP" /><input id="burnShare" placeholder="销毁 BP" /><input id="lpShare" placeholder="LP BP" /><input id="dividendShare" placeholder="分红 BP" /></div>
               <button data-action="setTaxShares">设置分配比例</button>
