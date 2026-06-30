@@ -27,6 +27,356 @@ interface IPancakeFactoryV2 {
 interface IPancakePairV2 {
     function token0() external view returns (address);
     function getReserves() external view returns (uint112 reserve0, uint112 reserve1, uint32 blockTimestampLast);
+    function totalSupply() external view returns (uint256);
+    function balanceOf(address account) external view returns (uint256);
+}
+
+interface IFairMintDividendDistributor {
+    function rewardTokenAddress() external view returns (address);
+    function pendingTokenDividend(address user) external view returns (uint256);
+    function pendingLPDividend(address user) external view returns (uint256);
+    function dividendReserve() external view returns (uint256);
+    function minTokenDividendBalance() external view returns (uint256);
+    function autoDividendEnabled() external view returns (bool);
+    function autoDividendBatchSize() external view returns (uint256);
+    function dividendHolderCount() external view returns (uint256);
+    function dividendExcludedCount() external view returns (uint256);
+    function eligibleTokenDividendSupply() external view returns (uint256);
+    function eligibleLPDividendSupply() external view returns (uint256);
+    function isExcludedFromDividends(address user) external view returns (bool);
+    function claimDividends() external;
+    function syncLPDividendDebt() external;
+    function syncBefore(address user) external;
+    function syncAfter(address user) external;
+    function processAutoDividends(uint256 maxCount) external;
+    function notifyTokenDividendNative() external payable;
+    function notifyTokenDividendToken(uint256 amount) external;
+    function notifyLPDividendNative() external payable;
+    function notifyLPDividendToken(uint256 amount) external;
+}
+
+contract FairMintDividendDistributor is Ownable, ReentrancyGuard {
+    using SafeERC20 for IERC20;
+
+    uint256 public constant ACC = 1e36;
+
+    address public immutable token;
+    address public immutable pair;
+    address public immutable router;
+    address public rewardToken;
+    address public deadWallet;
+    uint256 public tokenDividendPerShare;
+    uint256 public lpDividendPerShare;
+    uint256 public dividendReserve;
+    uint256 public minTokenDividendBalance;
+    mapping(address => bool) private excludedMap;
+    mapping(address => bool) private exclusionKnown;
+    address[] public dividendExcludedAddresses;
+    mapping(address => uint256) public tokenDividendDebt;
+    mapping(address => uint256) public tokenDividendCredit;
+    mapping(address => uint256) public lpDividendDebt;
+    mapping(address => uint256) public lpBalanceSnapshot;
+    address[] public dividendHolders;
+    mapping(address => bool) public isDividendHolder;
+    uint256 public dividendProcessIndex;
+    bool public autoDividendEnabled = true;
+    uint256 public autoDividendBatchSize = 5;
+
+    event TokenDividendFunded(uint256 amount);
+    event LPDividendFunded(uint256 amount);
+    event DividendClaimed(address indexed user, uint256 tokenReward, uint256 lpReward);
+    event AutoDividendProcessed(uint256 processed, uint256 paid);
+
+    modifier onlyToken() {
+        require(msg.sender == token, "only token");
+        _;
+    }
+
+    constructor(
+        address token_,
+        address pair_,
+        address router_,
+        address rewardToken_,
+        address deadWallet_,
+        address owner_,
+        uint256 minTokenDividendBalance_
+    ) Ownable(owner_) {
+        require(token_ != address(0) && pair_ != address(0) && router_ != address(0), "zero addr");
+        token = token_;
+        pair = pair_;
+        router = router_;
+        rewardToken = rewardToken_;
+        deadWallet = deadWallet_;
+        minTokenDividendBalance = minTokenDividendBalance_;
+        _setExcludedFromDividends(address(0), true);
+        _setExcludedFromDividends(deadWallet_, true);
+        _setExcludedFromDividends(address(this), true);
+        _setExcludedFromDividends(token_, true);
+        _setExcludedFromDividends(pair_, true);
+        _setExcludedFromDividends(router_, true);
+    }
+
+    function rewardTokenAddress() public view returns (address) { return rewardToken; }
+    function isExcludedFromDividends(address user) public view returns (bool) { return excludedMap[user]; }
+    function _isNativeReward() internal view returns (bool) { return rewardToken == address(0); }
+    function _tokenBalance(address user) internal view returns (uint256) { return IERC20(token).balanceOf(user); }
+    function _lpBalance(address user) internal view returns (uint256) { return IERC20(pair).balanceOf(user); }
+
+    function eligibleTokenDividendSupply() public view returns (uint256) {
+        uint256 supply = IERC20(token).totalSupply();
+        for (uint256 i; i < dividendExcludedAddresses.length; i++) {
+            address user = dividendExcludedAddresses[i];
+            if (!excludedMap[user]) continue;
+            uint256 excludedBalance = IERC20(token).balanceOf(user);
+            if (excludedBalance >= supply) return 0;
+            supply -= excludedBalance;
+        }
+        return supply;
+    }
+
+    function eligibleLPDividendSupply() public view returns (uint256) {
+        uint256 supply = IERC20(pair).totalSupply();
+        for (uint256 i; i < dividendExcludedAddresses.length; i++) {
+            address user = dividendExcludedAddresses[i];
+            if (!excludedMap[user]) continue;
+            uint256 excludedLP = IERC20(pair).balanceOf(user);
+            if (excludedLP >= supply) return 0;
+            supply -= excludedLP;
+        }
+        return supply;
+    }
+
+    function dividendExcludedCount() external view returns (uint256) { return dividendExcludedAddresses.length; }
+    function syncBefore(address user) external onlyToken { _accrueTokenDividend(user); }
+    function syncAfter(address user) external onlyToken { _settleTokenDividend(user); _trackDividendHolder(user); }
+
+    function notifyTokenDividendNative() external payable onlyToken {
+        require(_isNativeReward(), "not native reward");
+        _fundTokenDividendManual(msg.value);
+    }
+
+    function notifyTokenDividendToken(uint256 amount) external onlyToken {
+        require(!_isNativeReward(), "native reward");
+        _fundTokenDividendManual(amount);
+    }
+
+    function notifyLPDividendNative() external payable onlyToken {
+        require(_isNativeReward(), "not native reward");
+        _fundLPDividendManual(msg.value);
+    }
+
+    function notifyLPDividendToken(uint256 amount) external onlyToken {
+        require(!_isNativeReward(), "native reward");
+        _fundLPDividendManual(amount);
+    }
+
+    function fundTokenDividendBNB() external payable onlyOwner {
+        require(_isNativeReward(), "not native reward");
+        _fundTokenDividendManual(msg.value);
+    }
+
+    function fundTokenDividendToken(uint256 amount) public onlyOwner {
+        require(!_isNativeReward(), "native reward");
+        IERC20(rewardTokenAddress()).safeTransferFrom(msg.sender, address(this), amount);
+        _fundTokenDividendManual(amount);
+    }
+
+    function fundLPDividendBNB() external payable onlyOwner {
+        require(_isNativeReward(), "not native reward");
+        _fundLPDividendManual(msg.value);
+    }
+
+    function fundLPDividendToken(uint256 amount) public onlyOwner {
+        require(!_isNativeReward(), "native reward");
+        IERC20(rewardTokenAddress()).safeTransferFrom(msg.sender, address(this), amount);
+        _fundLPDividendManual(amount);
+    }
+
+    function _fundTokenDividendManual(uint256 amount) internal {
+        uint256 circulating = eligibleTokenDividendSupply();
+        require(circulating > 0, "no circulating supply");
+        dividendReserve += amount;
+        tokenDividendPerShare += amount * ACC / circulating;
+        emit TokenDividendFunded(amount);
+    }
+
+    function _fundLPDividendManual(uint256 amount) internal {
+        uint256 lpSupply = eligibleLPDividendSupply();
+        require(lpSupply > 0, "no lp supply");
+        dividendReserve += amount;
+        lpDividendPerShare += amount * ACC / lpSupply;
+        emit LPDividendFunded(amount);
+    }
+
+    function pendingTokenDividend(address user) public view returns (uint256) {
+        if (excludedMap[user]) return 0;
+        uint256 pending = tokenDividendCredit[user];
+        uint256 balance = _tokenBalance(user);
+        if (balance < minTokenDividendBalance) return pending;
+        uint256 accumulated = balance * tokenDividendPerShare / ACC;
+        if (accumulated > tokenDividendDebt[user]) pending += accumulated - tokenDividendDebt[user];
+        return pending;
+    }
+
+    function pendingLPDividend(address user) public view returns (uint256) {
+        if (excludedMap[user]) return 0;
+        uint256 lpBal = _lpBalance(user);
+        uint256 accumulated = lpBal * lpDividendPerShare / ACC;
+        if (accumulated <= lpDividendDebt[user]) return 0;
+        return accumulated - lpDividendDebt[user];
+    }
+
+    function claimDividends() external nonReentrant {
+        require(!excludedMap[msg.sender], "dividend excluded");
+        uint256 tokenReward = pendingTokenDividend(msg.sender);
+        uint256 lpReward = pendingLPDividend(msg.sender);
+        uint256 reward = tokenReward + lpReward;
+        tokenDividendCredit[msg.sender] = 0;
+        tokenDividendDebt[msg.sender] = _tokenBalance(msg.sender) * tokenDividendPerShare / ACC;
+        lpBalanceSnapshot[msg.sender] = _lpBalance(msg.sender);
+        lpDividendDebt[msg.sender] = lpBalanceSnapshot[msg.sender] * lpDividendPerShare / ACC;
+        if (reward > 0) {
+            require(dividendReserve >= reward, "dividend reserve");
+            dividendReserve -= reward;
+            _sendReward(msg.sender, reward);
+        }
+        emit DividendClaimed(msg.sender, tokenReward, lpReward);
+    }
+
+    function syncLPDividendDebt() external {
+        if (excludedMap[msg.sender]) {
+            lpBalanceSnapshot[msg.sender] = 0;
+            lpDividendDebt[msg.sender] = 0;
+            return;
+        }
+        lpBalanceSnapshot[msg.sender] = _lpBalance(msg.sender);
+        lpDividendDebt[msg.sender] = lpBalanceSnapshot[msg.sender] * lpDividendPerShare / ACC;
+    }
+
+    function _accrueTokenDividend(address user) internal {
+        if (user == address(0)) return;
+        if (excludedMap[user]) {
+            tokenDividendCredit[user] = 0;
+            tokenDividendDebt[user] = 0;
+            return;
+        }
+        uint256 pending = pendingTokenDividend(user);
+        if (pending > tokenDividendCredit[user]) tokenDividendCredit[user] = pending;
+        tokenDividendDebt[user] = _tokenBalance(user) * tokenDividendPerShare / ACC;
+    }
+
+    function _settleTokenDividend(address user) internal {
+        if (user == address(0)) return;
+        tokenDividendDebt[user] = excludedMap[user] ? 0 : _tokenBalance(user) * tokenDividendPerShare / ACC;
+    }
+
+    function _trackDividendHolder(address user) internal {
+        if (user == address(0) || excludedMap[user] || isDividendHolder[user]) return;
+        uint256 bal = _tokenBalance(user);
+        if (bal > 0 && bal >= minTokenDividendBalance) {
+            isDividendHolder[user] = true;
+            dividendHolders.push(user);
+        }
+    }
+
+    function processAutoDividends(uint256 maxCount) external onlyToken {
+        if (autoDividendEnabled) _processAutoDividends(maxCount);
+    }
+
+    function _processAutoDividends(uint256 maxCount) internal {
+        uint256 total = dividendHolders.length;
+        if (total == 0 || maxCount == 0 || dividendReserve == 0) return;
+        uint256 processed;
+        uint256 paid;
+        uint256 iterations;
+        while (processed < maxCount && iterations < total && dividendReserve > 0) {
+            if (dividendProcessIndex >= total) dividendProcessIndex = 0;
+            address user = dividendHolders[dividendProcessIndex];
+            dividendProcessIndex += 1;
+            iterations += 1;
+            if (excludedMap[user] || _tokenBalance(user) < minTokenDividendBalance) continue;
+            uint256 tokenReward = pendingTokenDividend(user);
+            uint256 lpReward = pendingLPDividend(user);
+            uint256 reward = tokenReward + lpReward;
+            if (reward == 0 || reward > dividendReserve) continue;
+            if (_trySendReward(user, reward)) {
+                tokenDividendCredit[user] = 0;
+                tokenDividendDebt[user] = _tokenBalance(user) * tokenDividendPerShare / ACC;
+                lpBalanceSnapshot[user] = _lpBalance(user);
+                lpDividendDebt[user] = lpBalanceSnapshot[user] * lpDividendPerShare / ACC;
+                dividendReserve -= reward;
+                paid += reward;
+                processed += 1;
+                emit DividendClaimed(user, tokenReward, lpReward);
+            }
+        }
+        if (processed > 0) emit AutoDividendProcessed(processed, paid);
+    }
+
+    function _sendReward(address to, uint256 amount) internal {
+        if (amount == 0) return;
+        if (_isNativeReward()) payable(to).transfer(amount);
+        else IERC20(rewardTokenAddress()).safeTransfer(to, amount);
+    }
+
+    function _trySendReward(address to, uint256 amount) internal returns (bool) {
+        if (amount == 0) return true;
+        if (_isNativeReward()) { (bool ok,) = payable(to).call{value: amount, gas: 30000}(""); return ok; }
+        (bool success, bytes memory data) = rewardTokenAddress().call(abi.encodeWithSelector(IERC20.transfer.selector, to, amount));
+        return success && (data.length == 0 || abi.decode(data, (bool)));
+    }
+
+    function _isCoreDividendExcluded(address user) internal view returns (bool) {
+        return user == address(0) || user == deadWallet || user == address(this) || user == token || user == pair || user == router;
+    }
+
+    function _setExcludedFromDividends(address user, bool v) internal {
+        if (excludedMap[user] == v) return;
+        if (v) {
+            excludedMap[user] = true;
+            tokenDividendCredit[user] = 0;
+            tokenDividendDebt[user] = 0;
+            lpBalanceSnapshot[user] = 0;
+            lpDividendDebt[user] = 0;
+            if (!exclusionKnown[user]) { exclusionKnown[user] = true; dividendExcludedAddresses.push(user); }
+        } else {
+            excludedMap[user] = false;
+            tokenDividendDebt[user] = _tokenBalance(user) * tokenDividendPerShare / ACC;
+            lpBalanceSnapshot[user] = _lpBalance(user);
+            lpDividendDebt[user] = lpBalanceSnapshot[user] * lpDividendPerShare / ACC;
+        }
+    }
+
+    function setExcludedFromDividends(address user, bool v) external onlyOwner {
+        if (!v) require(!_isCoreDividendExcluded(user), "core dividend exclusion");
+        _setExcludedFromDividends(user, v);
+    }
+
+    function batchSetExcludedFromDividends(address[] calldata users, bool v) external onlyOwner {
+        for (uint256 i; i < users.length; i++) {
+            if (!v) require(!_isCoreDividendExcluded(users[i]), "core dividend exclusion");
+            _setExcludedFromDividends(users[i], v);
+        }
+    }
+
+    function setRewardToken(address v) external onlyOwner {
+        require(dividendReserve == 0, "reserve not empty");
+        require(v != token, "bad reward token");
+        rewardToken = v;
+    }
+
+    function setMinTokenDividendBalance(uint256 v) external onlyOwner { minTokenDividendBalance = v; }
+    function setAutoDividendEnabled(bool v) external onlyOwner { autoDividendEnabled = v; }
+    function setAutoDividendBatchSize(uint256 v) external onlyOwner { require(v > 0 && v <= 20, "bad batch"); autoDividendBatchSize = v; }
+
+    function withdrawDividendReserve(uint256 amount) external onlyOwner {
+        uint256 toSend = amount == 0 ? dividendReserve : amount;
+        require(toSend <= dividendReserve, "exceeds reserve");
+        dividendReserve -= toSend;
+        _sendReward(owner(), toSend);
+    }
+
+    receive() external payable {}
 }
 
 contract FairMintTokenV1 is ERC20, Ownable, Pausable, ReentrancyGuard {
@@ -81,6 +431,8 @@ contract FairMintTokenV1 is ERC20, Ownable, Pausable, ReentrancyGuard {
     address public marketingWallet;
     address public rewardToken;
     address public deadWallet;
+    address public dividendDistributor;
+    bool public externalDividendDistributorEnabled;
     bool public swapEnabled = true;
     bool private inSwap;
     bool public taxesLocked;
@@ -179,6 +531,10 @@ contract FairMintTokenV1 is ERC20, Ownable, Pausable, ReentrancyGuard {
         _setExcludedFromDividends(pair, true);
         _setExcludedFromDividends(router_, true);
     }
+    function dividendMode() external view returns (uint8) { return _useExternalDistributor() ? 1 : 0; }
+    function activeDividendContract() external view returns (address) { return _useExternalDistributor() ? dividendDistributor : address(this); }
+    function _useExternalDistributor() internal view returns (bool) { return externalDividendDistributorEnabled && dividendDistributor != address(0); }
+    function _distributor() internal view returns (IFairMintDividendDistributor) { return IFairMintDividendDistributor(dividendDistributor); }
     receive() external payable nonReentrant whenNotPaused { if (msg.sender == address(router)) return; _mintBNB(msg.sender, msg.value); }
     function decimals() public pure override returns (uint8) { return 18; }
     function mintBNB() external payable nonReentrant whenNotPaused { _mintBNB(msg.sender, msg.value); }
@@ -200,6 +556,8 @@ contract FairMintTokenV1 is ERC20, Ownable, Pausable, ReentrancyGuard {
         emit Minted(user, paidAmount, userTokens, lpTokens, lpFund);
         if (mintedCount >= maxMintCount) { mintEnabled = false; if (launchMode == LaunchMode.AUTO) _openTrading(); }
     }
+    function _externalSyncBefore(address user) internal { if (_useExternalDistributor() && user != address(0)) _distributor().syncBefore(user); }
+    function _externalSyncAfter(address user) internal { if (_useExternalDistributor() && user != address(0)) _distributor().syncAfter(user); }
     function _update(address from, address to, uint256 amount) internal override {
         if (from == address(0) || to == address(0)) { _updateExcludedTokenBalance(from, to, amount); super._update(from, to, amount); return; }
         uint256 grossAmount = amount;
@@ -213,11 +571,23 @@ contract FairMintTokenV1 is ERC20, Ownable, Pausable, ReentrancyGuard {
             uint256 taxRate; if (from == pair) taxRate = buyTax; else if (to == pair) taxRate = sellTax; else taxRate = transferTax;
             if (taxRate > 0) taxAmount = amount * taxRate / DENOMINATOR;
         }
-        if (taxAmount > 0) { _updateExcludedTokenBalance(from, address(this), taxAmount); super._update(from, address(this), taxAmount); pendingTaxTokens += taxAmount; amount -= taxAmount; }
+        if (taxAmount > 0) {
+            if (!_useExternalDistributor()) _updateExcludedTokenBalance(from, address(this), taxAmount);
+            _externalSyncBefore(from); _externalSyncBefore(address(this));
+            super._update(from, address(this), taxAmount);
+            _externalSyncAfter(from); _externalSyncAfter(address(this));
+            pendingTaxTokens += taxAmount; amount -= taxAmount;
+        }
         if (from == pair && buyWhitelistEnabled && !preLaunchBuy) require(buyWhitelist[to], "buy whitelist");
         if (buyLimitEnabled && from == pair && !isExcludedFromLimits[to]) { boughtAmount[to] += amount; require(boughtAmount[to] <= maxBuyAmountPerWallet, "buy limit"); }
         if (buyAmountLimitEnabled && from == pair && !isExcludedFromLimits[to]) { boughtBaseAmount[to] += _baseAmountForBuy(grossAmount); require(boughtBaseAmount[to] <= maxBuyBaseAmountPerWallet, "buy amount limit"); }
-        _accrueTokenDividend(from); _accrueTokenDividend(to); _updateExcludedTokenBalance(from, to, amount); super._update(from, to, amount); _settleTokenDividend(from); _settleTokenDividend(to); _trackDividendHolder(from); _trackDividendHolder(to);
+        if (_useExternalDistributor()) {
+            _externalSyncBefore(from); _externalSyncBefore(to);
+            super._update(from, to, amount);
+            _externalSyncAfter(from); _externalSyncAfter(to);
+        } else {
+            _accrueTokenDividend(from); _accrueTokenDividend(to); _updateExcludedTokenBalance(from, to, amount); super._update(from, to, amount); _settleTokenDividend(from); _settleTokenDividend(to); _trackDividendHolder(from); _trackDividendHolder(to);
+        }
     }
     function _updateExcludedTokenBalance(address from, address to, uint256 amount) internal {
         if (amount == 0 || from == to) return;
@@ -263,13 +633,14 @@ contract FairMintTokenV1 is ERC20, Ownable, Pausable, ReentrancyGuard {
             _sendBase(marketingWallet, marketingAmt);
             _fundTokenDividendFromSwap(dividendAmt);
             if (lpAmt > 0 && lpTokenHalf > 0) { _approve(address(this), address(router), lpTokenHalf); if (mintMode == MintMode.BNB) router.addLiquidityETH{value: lpAmt}(address(this), lpTokenHalf, 0, 0, owner(), block.timestamp); else { IERC20(usdtAddress).forceApprove(address(router), lpAmt); router.addLiquidity(address(this), usdtAddress, lpTokenHalf, lpAmt, 0, 0, owner(), block.timestamp); } }
-            if (autoDividendEnabled) _processAutoDividends(autoDividendBatchSize);
+            if (_useExternalDistributor()) _distributor().processAutoDividends(autoDividendBatchSize);
+            else if (autoDividendEnabled) _processAutoDividends(autoDividendBatchSize);
         }
         emit SwapBack(tokenAmount, received);
     }
     function forceSwapBack() external onlyOwner { _swapBack(pendingTaxTokens); }
     function forceAddLiquidity(uint256 tokenAmount, uint256 fundAmount) external payable onlyOwner nonReentrant lockSwap { require(tokenAmount > 0 && fundAmount > 0, "zero amount"); _approve(address(this), address(router), tokenAmount); if (mintMode == MintMode.BNB) { require(msg.value == fundAmount, "bad BNB"); router.addLiquidityETH{value: fundAmount}(address(this), tokenAmount, 0, 0, owner(), block.timestamp); } else { IERC20(usdtAddress).safeTransferFrom(msg.sender, address(this), fundAmount); IERC20(usdtAddress).forceApprove(address(router), fundAmount); router.addLiquidity(address(this), usdtAddress, tokenAmount, fundAmount, 0, 0, owner(), block.timestamp); } }
-    function rewardTokenAddress() public view returns (address) { return rewardToken == address(0) ? (mintMode == MintMode.BNB ? address(0) : usdtAddress) : rewardToken; }
+    function rewardTokenAddress() public view returns (address) { if (_useExternalDistributor()) return _distributor().rewardTokenAddress(); return rewardToken == address(0) ? (mintMode == MintMode.BNB ? address(0) : usdtAddress) : rewardToken; }
     function _isNativeReward() internal view returns (bool) { return rewardTokenAddress() == address(0); }
     function _baseToken() internal view returns (address) { return mintMode == MintMode.BNB ? address(0) : usdtAddress; }
     function _baseBalance() internal view returns (uint256) { return mintMode == MintMode.BNB ? address(this).balance : IERC20(usdtAddress).balanceOf(address(this)); }
@@ -286,8 +657,9 @@ contract FairMintTokenV1 is ERC20, Ownable, Pausable, ReentrancyGuard {
         else { IERC20(usdtAddress).forceApprove(address(router), amount); address[] memory path = new address[](3); path[0] = usdtAddress; path[1] = router.WETH(); path[2] = target; router.swapExactTokensForTokensSupportingFeeOnTransferTokens(amount, 0, path, address(this), block.timestamp); }
         return IERC20(target).balanceOf(address(this)) - beforeBal;
     }
-    function eligibleTokenDividendSupply() public view returns (uint256) { return totalSupply() - excludedTokenBalance; }
+    function eligibleTokenDividendSupply() public view returns (uint256) { if (_useExternalDistributor()) return _distributor().eligibleTokenDividendSupply(); return totalSupply() - excludedTokenBalance; }
     function eligibleLPDividendSupply() public view returns (uint256) {
+        if (_useExternalDistributor()) return _distributor().eligibleLPDividendSupply();
         uint256 supply = IERC20(pair).totalSupply();
         for (uint256 i; i < dividendExcludedAddresses.length; i++) {
             address user = dividendExcludedAddresses[i];
@@ -298,21 +670,31 @@ contract FairMintTokenV1 is ERC20, Ownable, Pausable, ReentrancyGuard {
         }
         return supply;
     }
-    function dividendExcludedCount() external view returns (uint256) { return dividendExcludedAddresses.length; }
-    function _fundTokenDividendFromSwap(uint256 baseAmount) internal { if (baseAmount == 0) return; uint256 rewardAmount = _isNativeReward() ? baseAmount : _convertBaseToReward(baseAmount); uint256 circulating = eligibleTokenDividendSupply(); if (circulating == 0) { _sendReward(marketingWallet, rewardAmount); return; } dividendReserve += rewardAmount; tokenDividendPerShare += rewardAmount * ACC / circulating; emit TokenDividendFunded(rewardAmount); }
-    function fundTokenDividendBNB() external payable onlyOwner { require(_isNativeReward(), "not native reward"); _fundTokenDividendManual(msg.value); }
-    function fundTokenDividendToken(uint256 amount) public onlyOwner { require(!_isNativeReward(), "native reward"); IERC20(rewardTokenAddress()).safeTransferFrom(msg.sender, address(this), amount); _fundTokenDividendManual(amount); }
+    function dividendExcludedCount() external view returns (uint256) { return _useExternalDistributor() ? _distributor().dividendExcludedCount() : dividendExcludedAddresses.length; }
+    function _fundTokenDividendFromSwap(uint256 baseAmount) internal {
+        if (baseAmount == 0) return;
+        uint256 rewardAmount = _isNativeReward() ? baseAmount : _convertBaseToReward(baseAmount);
+        if (_useExternalDistributor()) {
+            if (rewardAmount == 0) return;
+            if (_isNativeReward()) _distributor().notifyTokenDividendNative{value: rewardAmount}();
+            else { IERC20(rewardTokenAddress()).safeTransfer(dividendDistributor, rewardAmount); _distributor().notifyTokenDividendToken(rewardAmount); }
+            return;
+        }
+        uint256 circulating = eligibleTokenDividendSupply(); if (circulating == 0) { _sendReward(marketingWallet, rewardAmount); return; } dividendReserve += rewardAmount; tokenDividendPerShare += rewardAmount * ACC / circulating; emit TokenDividendFunded(rewardAmount);
+    }
+    function fundTokenDividendBNB() external payable onlyOwner { require(_isNativeReward(), "not native reward"); if (_useExternalDistributor()) _distributor().notifyTokenDividendNative{value: msg.value}(); else _fundTokenDividendManual(msg.value); }
+    function fundTokenDividendToken(uint256 amount) public onlyOwner { require(!_isNativeReward(), "native reward"); if (_useExternalDistributor()) { IERC20(rewardTokenAddress()).safeTransferFrom(msg.sender, dividendDistributor, amount); _distributor().notifyTokenDividendToken(amount); } else { IERC20(rewardTokenAddress()).safeTransferFrom(msg.sender, address(this), amount); _fundTokenDividendManual(amount); } }
     function fundTokenDividendUSDT(uint256 amount) external onlyOwner { require(rewardTokenAddress() == usdtAddress, "not USDT reward"); fundTokenDividendToken(amount); }
     function _fundTokenDividendManual(uint256 amount) internal { uint256 circulating = eligibleTokenDividendSupply(); require(circulating > 0, "no circulating supply"); dividendReserve += amount; tokenDividendPerShare += amount * ACC / circulating; emit TokenDividendFunded(amount); }
-    function fundLPDividendBNB() external payable onlyOwner { require(_isNativeReward(), "not native reward"); _fundLPDividendManual(msg.value); }
-    function fundLPDividendToken(uint256 amount) public onlyOwner { require(!_isNativeReward(), "native reward"); IERC20(rewardTokenAddress()).safeTransferFrom(msg.sender, address(this), amount); _fundLPDividendManual(amount); }
+    function fundLPDividendBNB() external payable onlyOwner { require(_isNativeReward(), "not native reward"); if (_useExternalDistributor()) _distributor().notifyLPDividendNative{value: msg.value}(); else _fundLPDividendManual(msg.value); }
+    function fundLPDividendToken(uint256 amount) public onlyOwner { require(!_isNativeReward(), "native reward"); if (_useExternalDistributor()) { IERC20(rewardTokenAddress()).safeTransferFrom(msg.sender, dividendDistributor, amount); (bool ok,) = dividendDistributor.call(abi.encodeWithSignature("notifyLPDividendToken(uint256)", amount)); require(ok, "external lp fund failed"); } else { IERC20(rewardTokenAddress()).safeTransferFrom(msg.sender, address(this), amount); _fundLPDividendManual(amount); } }
     function fundLPDividendUSDT(uint256 amount) external onlyOwner { require(rewardTokenAddress() == usdtAddress, "not USDT reward"); fundLPDividendToken(amount); }
     function _fundLPDividendManual(uint256 amount) internal { uint256 lpSupply = eligibleLPDividendSupply(); require(lpSupply > 0, "no lp supply"); dividendReserve += amount; lpDividendPerShare += amount * ACC / lpSupply; emit LPDividendFunded(amount); }
-    function claimDividends() external nonReentrant { require(!isExcludedFromDividends[msg.sender], "dividend excluded"); uint256 tokenReward = pendingTokenDividend(msg.sender); uint256 lpReward = pendingLPDividend(msg.sender); uint256 reward = tokenReward + lpReward; tokenDividendCredit[msg.sender] = 0; tokenDividendDebt[msg.sender] = balanceOf(msg.sender) * tokenDividendPerShare / ACC; lpBalanceSnapshot[msg.sender] = IERC20(pair).balanceOf(msg.sender); lpDividendDebt[msg.sender] = lpBalanceSnapshot[msg.sender] * lpDividendPerShare / ACC; if (reward > 0) { require(dividendReserve >= reward, "dividend reserve"); dividendReserve -= reward; _sendReward(msg.sender, reward); } emit DividendClaimed(msg.sender, tokenReward, lpReward); }
-    function dividendHolderCount() external view returns (uint256) { return dividendHolders.length; }
-    function pendingTokenDividend(address user) public view returns (uint256) { if (isExcludedFromDividends[user]) return 0; uint256 pending = tokenDividendCredit[user]; if (balanceOf(user) < minTokenDividendBalance) return pending; uint256 accumulated = balanceOf(user) * tokenDividendPerShare / ACC; if (accumulated > tokenDividendDebt[user]) pending += accumulated - tokenDividendDebt[user]; return pending; }
-    function pendingLPDividend(address user) public view returns (uint256) { if (isExcludedFromDividends[user]) return 0; uint256 lpBal = IERC20(pair).balanceOf(user); uint256 accumulated = lpBal * lpDividendPerShare / ACC; if (accumulated <= lpDividendDebt[user]) return 0; return accumulated - lpDividendDebt[user]; }
-    function syncLPDividendDebt() external { if (isExcludedFromDividends[msg.sender]) { lpBalanceSnapshot[msg.sender] = 0; lpDividendDebt[msg.sender] = 0; return; } lpBalanceSnapshot[msg.sender] = IERC20(pair).balanceOf(msg.sender); lpDividendDebt[msg.sender] = lpBalanceSnapshot[msg.sender] * lpDividendPerShare / ACC; }
+    function claimDividends() external nonReentrant { if (_useExternalDistributor()) { _distributor().claimDividends(); return; } require(!isExcludedFromDividends[msg.sender], "dividend excluded"); uint256 tokenReward = pendingTokenDividend(msg.sender); uint256 lpReward = pendingLPDividend(msg.sender); uint256 reward = tokenReward + lpReward; tokenDividendCredit[msg.sender] = 0; tokenDividendDebt[msg.sender] = balanceOf(msg.sender) * tokenDividendPerShare / ACC; lpBalanceSnapshot[msg.sender] = IERC20(pair).balanceOf(msg.sender); lpDividendDebt[msg.sender] = lpBalanceSnapshot[msg.sender] * lpDividendPerShare / ACC; if (reward > 0) { require(dividendReserve >= reward, "dividend reserve"); dividendReserve -= reward; _sendReward(msg.sender, reward); } emit DividendClaimed(msg.sender, tokenReward, lpReward); }
+    function dividendHolderCount() external view returns (uint256) { return _useExternalDistributor() ? _distributor().dividendHolderCount() : dividendHolders.length; }
+    function pendingTokenDividend(address user) public view returns (uint256) { if (_useExternalDistributor()) return _distributor().pendingTokenDividend(user); if (isExcludedFromDividends[user]) return 0; uint256 pending = tokenDividendCredit[user]; if (balanceOf(user) < minTokenDividendBalance) return pending; uint256 accumulated = balanceOf(user) * tokenDividendPerShare / ACC; if (accumulated > tokenDividendDebt[user]) pending += accumulated - tokenDividendDebt[user]; return pending; }
+    function pendingLPDividend(address user) public view returns (uint256) { if (_useExternalDistributor()) return _distributor().pendingLPDividend(user); if (isExcludedFromDividends[user]) return 0; uint256 lpBal = IERC20(pair).balanceOf(user); uint256 accumulated = lpBal * lpDividendPerShare / ACC; if (accumulated <= lpDividendDebt[user]) return 0; return accumulated - lpDividendDebt[user]; }
+    function syncLPDividendDebt() external { if (_useExternalDistributor()) { _distributor().syncLPDividendDebt(); return; } if (isExcludedFromDividends[msg.sender]) { lpBalanceSnapshot[msg.sender] = 0; lpDividendDebt[msg.sender] = 0; return; } lpBalanceSnapshot[msg.sender] = IERC20(pair).balanceOf(msg.sender); lpDividendDebt[msg.sender] = lpBalanceSnapshot[msg.sender] * lpDividendPerShare / ACC; }
     function _accrueTokenDividend(address user) internal { if (isExcludedFromDividends[user]) { tokenDividendCredit[user] = 0; tokenDividendDebt[user] = 0; return; } uint256 pending = pendingTokenDividend(user); if (pending > tokenDividendCredit[user]) tokenDividendCredit[user] = pending; tokenDividendDebt[user] = balanceOf(user) * tokenDividendPerShare / ACC; }
     function _settleTokenDividend(address user) internal { tokenDividendDebt[user] = isExcludedFromDividends[user] ? 0 : balanceOf(user) * tokenDividendPerShare / ACC; }
     function _trackDividendHolder(address user) internal { if (isExcludedFromDividends[user] || isDividendHolder[user]) return; uint256 bal = balanceOf(user); if (bal > 0 && bal >= minTokenDividendBalance) { isDividendHolder[user] = true; dividendHolders.push(user); } }
@@ -391,9 +773,14 @@ contract FairMintTokenV1 is ERC20, Ownable, Pausable, ReentrancyGuard {
     }
     function setExcludedFromDividends(address user, bool v) external onlyOwner { if (!v) require(!_isCoreDividendExcluded(user), "core dividend exclusion"); _setExcludedFromDividends(user, v); }
     function batchSetExcludedFromDividends(address[] calldata users, bool v) external onlyOwner { for (uint256 i; i < users.length; i++) { if (!v) require(!_isCoreDividendExcluded(users[i]), "core dividend exclusion"); _setExcludedFromDividends(users[i], v); } }
-    function setMinTokenDividendBalance(uint256 v) external onlyOwner { minTokenDividendBalance = v; }
-    function setAutoDividendEnabled(bool v) external onlyOwner { autoDividendEnabled = v; }
-    function setAutoDividendBatchSize(uint256 v) external onlyOwner { require(v > 0 && v <= 20, "bad batch"); autoDividendBatchSize = v; }
+    function dividendReserveView() external view returns (uint256) { return _useExternalDistributor() ? _distributor().dividendReserve() : dividendReserve; }
+    function isDividendExcluded(address user) external view returns (bool) { return _useExternalDistributor() ? _distributor().isExcludedFromDividends(user) : isExcludedFromDividends[user]; }
+    function minTokenDividendBalanceView() external view returns (uint256) { return _useExternalDistributor() ? _distributor().minTokenDividendBalance() : minTokenDividendBalance; }
+    function autoDividendEnabledView() external view returns (bool) { return _useExternalDistributor() ? _distributor().autoDividendEnabled() : autoDividendEnabled; }
+    function autoDividendBatchSizeView() external view returns (uint256) { return _useExternalDistributor() ? _distributor().autoDividendBatchSize() : autoDividendBatchSize; }
+    function setMinTokenDividendBalance(uint256 v) external onlyOwner { if (_useExternalDistributor()) revert("use distributor"); minTokenDividendBalance = v; }
+    function setAutoDividendEnabled(bool v) external onlyOwner { if (_useExternalDistributor()) revert("use distributor"); autoDividendEnabled = v; }
+    function setAutoDividendBatchSize(uint256 v) external onlyOwner { if (_useExternalDistributor()) revert("use distributor"); require(v > 0 && v <= 20, "bad batch"); autoDividendBatchSize = v; }
     function lockTaxes() external onlyOwner { taxesLocked = true; }
     function lockFeeExemptions() external onlyOwner { feeExemptionsLocked = true; }
     function disablePauseForever() external onlyOwner { pauseDisabledForever = true; }
@@ -407,7 +794,12 @@ contract FairMintTokenV1 is ERC20, Ownable, Pausable, ReentrancyGuard {
     function setDividendShare(uint256 v) external onlyOwner { require(!taxesLocked, "taxes locked"); dividendShare = v; _checkShares(); }
     function _checkShares() internal view { require(marketingShare + burnShare + lpShare + dividendShare == DENOMINATOR, "sum != 10000"); }
     function setMarketingWallet(address v) external onlyOwner { require(v != address(0), "zero"); marketingWallet = v; }
-    function setRewardToken(address v) external onlyOwner { require(dividendReserve == 0, "reserve not empty"); require(v != address(this), "bad reward token"); rewardToken = v; }
+    function setRewardToken(address v) external onlyOwner { require(!_useExternalDistributor(), "use distributor"); require(dividendReserve == 0, "reserve not empty"); require(v != address(this), "bad reward token"); rewardToken = v; }
+    function setDividendDistributor(address distributor, bool enabled) external onlyOwner {
+        if (enabled) require(distributor != address(0), "distributor zero");
+        dividendDistributor = distributor;
+        externalDividendDistributorEnabled = enabled && distributor != address(0);
+    }
     function setDeadWallet(address v) external onlyOwner { require(v != address(0), "zero"); deadWallet = v; }
     function setSwapEnabled(bool v) external onlyOwner { swapEnabled = v; }
     function setSwapThreshold(uint256 v) external onlyOwner { swapThreshold = v; }
@@ -415,7 +807,7 @@ contract FairMintTokenV1 is ERC20, Ownable, Pausable, ReentrancyGuard {
     function unpause() external onlyOwner { _unpause(); }
     function withdrawBNB(uint256 amount) external onlyOwner { uint256 bal = address(this).balance; uint256 locked = _isNativeReward() ? dividendReserve : 0; require(bal > locked, "no available BNB"); uint256 available = bal - locked; uint256 toSend = amount == 0 ? available : amount; require(toSend <= available, "exceeds available"); payable(owner()).transfer(toSend); }
     function withdrawToken(address token, uint256 amount) external onlyOwner { IERC20 erc = IERC20(token); uint256 bal = erc.balanceOf(address(this)); uint256 locked = (!_isNativeReward() && token == rewardTokenAddress()) ? dividendReserve : 0; require(bal > locked, "no available token"); uint256 available = bal - locked; uint256 toSend = amount == 0 ? available : amount; require(toSend <= available, "exceeds available"); erc.safeTransfer(owner(), toSend); }
-    function withdrawDividendReserve(uint256 amount) external onlyOwner { uint256 toSend = amount == 0 ? dividendReserve : amount; require(toSend <= dividendReserve, "exceeds reserve"); dividendReserve -= toSend; _sendReward(owner(), toSend); }
+    function withdrawDividendReserve(uint256 amount) external onlyOwner { require(!_useExternalDistributor(), "use distributor"); uint256 toSend = amount == 0 ? dividendReserve : amount; require(toSend <= dividendReserve, "exceeds reserve"); dividendReserve -= toSend; _sendReward(owner(), toSend); }
     function withdrawLP(uint256 amount) external onlyOwner { IERC20 lpToken = IERC20(pair); uint256 bal = lpToken.balanceOf(address(this)); lpToken.safeTransfer(owner(), amount == 0 ? bal : amount); }
 }`;
 
@@ -467,7 +859,7 @@ const NETWORK_DEFAULTS = {
     usdt: ""
   }
 };
-const state = { provider: null, signer: null, account: null, compiled: null, admin: null, mint: null };
+const state = { provider: null, signer: null, account: null, compiled: null, admin: null, mint: null, dividendAdmin: null };
 
 const $ = (id) => document.getElementById(id);
 const log = (msg) => { $("log").textContent = `[${new Date().toLocaleTimeString()}] ${msg}\n` + $("log").textContent; };
@@ -504,6 +896,23 @@ async function rewardInfo(contract) {
     token.decimals().catch(() => 18)
   ]);
   return { address: rewardAddress, symbol, decimals: Number(decimals), native: false };
+}
+
+async function dividendContractInfo(tokenContract) {
+  const [enabled, distributor] = await Promise.all([
+    tokenContract.externalDividendDistributorEnabled().catch(() => false),
+    tokenContract.dividendDistributor().catch(() => ZERO)
+  ]);
+  return {
+    enabled: Boolean(enabled) && distributor !== ZERO,
+    address: distributor
+  };
+}
+
+async function dividendAdminContract(tokenContract) {
+  const info = await dividendContractInfo(tokenContract);
+  if (!info.enabled) return tokenContract;
+  return new ethers.Contract(info.address, state.compiled.distributorAbi, state.signer);
 }
 
 function makeDownload(id, filename, content, type = "application/json") {
@@ -1010,10 +1419,13 @@ async function compileContract() {
   const errors = (output.errors || []).filter((e) => e.severity === "error");
   if (errors.length) throw new Error(errors.map((e) => e.formattedMessage).join("\n"));
   const contract = output.contracts["FairMintTokenV1.sol"].FairMintTokenV1;
+  const distributor = output.contracts["FairMintTokenV1.sol"].FairMintDividendDistributor;
   const factory = output.contracts["Create2Factory.sol"].Create2Factory;
   state.compiled = {
     abi: contract.abi,
     bytecode: "0x" + contract.evm.bytecode.object,
+    distributorAbi: distributor.abi,
+    distributorBytecode: "0x" + distributor.evm.bytecode.object,
     factoryAbi: factory.abi,
     factoryBytecode: "0x" + factory.evm.bytecode.object,
     standardJsonInput: input
@@ -1065,6 +1477,14 @@ function deployArgs(form) {
   ];
 }
 
+function readDividendMode(form) {
+  const fd = new FormData(form);
+  return {
+    external: fd.get("dividendMode") === "external",
+    owner: (fd.get("dividendOwner") || state.account || "").trim() || state.account
+  };
+}
+
 async function deployContract(form) {
   if (!form.checkValidity()) {
     form.reportValidity();
@@ -1075,6 +1495,7 @@ async function deployContract(form) {
   setDefaultMarketingWallet();
   applyNetworkDefaults();
   const args = deployArgs(form);
+  const dividendMode = readDividendMode(form);
   const constructorTypes = compiledConstructorTypes();
   if (constructorTypes.length !== args.length) {
     throw new Error(`构造参数数量不匹配：合约需要 ${constructorTypes.length} 项，网页生成 ${args.length} 项，请刷新后重新编译。`);
@@ -1085,6 +1506,8 @@ async function deployContract(form) {
   let deploymentHash;
   let factoryAddress = null;
   let vanitySalt = null;
+  let distributorAddress = null;
+  let distributorHash = null;
   if (vanity.enabled) {
     log("请在钱包中确认 CREATE2 工厂部署交易...");
     const create2Factory = new ethers.ContractFactory(state.compiled.factoryAbi, state.compiled.factoryBytecode, state.signer);
@@ -1115,6 +1538,26 @@ async function deployContract(form) {
     await contract.waitForDeployment();
     address = await contract.getAddress();
   }
+  if (dividendMode.external) {
+    const [pair, routerAddress, rewardAddress, deadWallet] = await Promise.all([
+      contract.pair(),
+      contract.router(),
+      contract.rewardTokenAddress(),
+      contract.deadWallet()
+    ]);
+    const distributorFactory = new ethers.ContractFactory(state.compiled.distributorAbi, state.compiled.distributorBytecode, state.signer);
+    log("请在钱包中确认独立分红合约部署交易...");
+    const distributor = await distributorFactory.deploy(address, pair, routerAddress, rewardAddress, deadWallet, dividendMode.owner, parseToken(form.elements.minTokenDividendBalance.value));
+    distributorHash = distributor.deploymentTransaction().hash;
+    log(`分红合约部署交易已提交：${distributorHash}`);
+    await distributor.waitForDeployment();
+    distributorAddress = await distributor.getAddress();
+    log(`独立分红合约部署完成：${distributorAddress}`);
+    await txDone(await contract.setDividendDistributor(distributorAddress, true), "绑定独立分红合约");
+    state.dividendAdmin = distributor;
+  } else {
+    state.dividendAdmin = null;
+  }
   const constructorArgs = ethers.AbiCoder.defaultAbiCoder().encode(constructorTypes, args).slice(2);
   const deploymentInfo = {
     contractAddress: address,
@@ -1124,6 +1567,8 @@ async function deployContract(form) {
     optimizer: { enabled: true, runs: 200, viaIR: true },
     constructorArguments: constructorArgs,
     constructorValues: args,
+    dividendMode,
+    dividendDistributor: distributorAddress ? { address: distributorAddress, owner: dividendMode.owner, transactionHash: distributorHash } : null,
     vanity: vanity.enabled ? { factoryAddress, salt: vanitySalt, suffix: vanity.suffix } : null,
     deployer: state.account,
     chainId: (await state.provider.getNetwork()).chainId.toString(),
@@ -1292,7 +1737,7 @@ async function refreshMint() {
   const [mintPrice, tokenPerMint, mintedCount, maxMintCount, mintEnabled, mode, pendingToken, pendingLP, reserve] = await Promise.all([
     state.mint.mintPrice(), state.mint.tokenPerMint(), state.mint.mintedCount(), state.mint.maxMintCount(),
     state.mint.mintEnabled(), state.mint.mintMode(), state.mint.pendingTokenDividend(state.account), state.mint.pendingLPDividend(state.account),
-    state.mint.dividendReserve()
+    state.mint.dividendReserveView ? state.mint.dividendReserveView() : state.mint.dividendReserve()
   ]);
   renderStats("mintStats", [
     ["Mint 价格", ethers.formatUnits(mintPrice, 18)],
@@ -1318,20 +1763,24 @@ async function refreshAdmin() {
     buyWhitelistEnabled,
     preLaunchBuyWhitelistEnabled,
     dividendExcludedCount, eligibleTokenDividendSupply, eligibleLPDividendSupply,
-    taxesLocked, feeExemptionsLocked, pauseDisabledForever
+    taxesLocked, feeExemptionsLocked, pauseDisabledForever, externalDividendDistributorEnabled, dividendDistributor
   ] = await Promise.all([
     state.admin.owner(), state.admin.pair(), state.admin.mintMode(), state.admin.mintPrice(), state.admin.tokenPerMint(),
     state.admin.mintedCount(), state.admin.maxMintCount(), state.admin.mintEnabled(), state.admin.tradingOpen(),
     state.admin.buyTax(), state.admin.sellTax(), state.admin.transferTax(), state.admin.marketingShare(),
     state.admin.burnShare(), state.admin.lpShare(), state.admin.dividendShare(), state.admin.marketingWallet(), state.admin.swapThreshold(),
-    state.admin.dividendReserve(), state.admin.buyLimitEnabled(), state.admin.maxBuyAmountPerWallet(), state.admin.minTokenDividendBalance(),
-    state.admin.autoDividendEnabled(), state.admin.autoDividendBatchSize(), state.admin.dividendHolderCount(),
+    state.admin.dividendReserveView ? state.admin.dividendReserveView() : state.admin.dividendReserve(), state.admin.buyLimitEnabled(), state.admin.maxBuyAmountPerWallet(), state.admin.minTokenDividendBalanceView ? state.admin.minTokenDividendBalanceView() : state.admin.minTokenDividendBalance(),
+    state.admin.autoDividendEnabledView ? state.admin.autoDividendEnabledView() : state.admin.autoDividendEnabled(), state.admin.autoDividendBatchSizeView ? state.admin.autoDividendBatchSizeView() : state.admin.autoDividendBatchSize(), state.admin.dividendHolderCount(),
     state.admin.buyAmountLimitEnabled(), state.admin.maxBuyBaseAmountPerWallet(),
     state.admin.buyWhitelistEnabled(),
     state.admin.preLaunchBuyWhitelistEnabled(),
     state.admin.dividendExcludedCount(), state.admin.eligibleTokenDividendSupply(), state.admin.eligibleLPDividendSupply(),
-    state.admin.taxesLocked(), state.admin.feeExemptionsLocked(), state.admin.pauseDisabledForever()
+    state.admin.taxesLocked(), state.admin.feeExemptionsLocked(), state.admin.pauseDisabledForever(),
+    state.admin.externalDividendDistributorEnabled().catch(() => false), state.admin.dividendDistributor().catch(() => ZERO)
   ]);
+  state.dividendAdmin = externalDividendDistributorEnabled && dividendDistributor !== ZERO
+    ? new ethers.Contract(dividendDistributor, state.compiled.distributorAbi, state.signer)
+    : null;
   renderStats("adminStats", [
     ["Owner", owner], ["Pair", pair], ["Mint 模式", Number(mintMode) === 0 ? "BNB" : "USDT"],
     ["Mint 价格", ethers.formatUnits(mintPrice, 18)], ["单次代币", ethers.formatUnits(tokenPerMint, 18)],
@@ -1382,7 +1831,9 @@ async function adminAction(action) {
   const listValue = parseBool($("listValue").value);
   const mode = Number(await c.mintMode());
   const usdt = mode === 1 ? await c.usdtAddress() : ZERO;
-  const reward = await rewardInfo(c);
+  const dividendTarget = await dividendAdminContract(c);
+  const dividendTargetAddress = await dividendTarget.getAddress();
+  const reward = await rewardInfo(dividendTarget);
   const renounceOwnership = async () => {
     if ($("renounceConfirmation").value.trim() !== "RENOUNCE") {
       throw new Error("请输入 RENOUNCE 确认永久丢弃管理员权限");
@@ -1411,8 +1862,8 @@ async function adminAction(action) {
     setPreLaunchBuyWhitelistEnabled: () => c.setPreLaunchBuyWhitelistEnabled(parseBool($("preLaunchBuyWhitelistEnabled").value)),
     setPreLaunchBuyWhitelist: () => c.setPreLaunchBuyWhitelist(listAddress, listValue),
     batchSetPreLaunchBuyWhitelist: () => c.batchSetPreLaunchBuyWhitelist(parseAddressList($("batchListAddresses").value), listValue),
-    setExcludedFromDividends: () => c.setExcludedFromDividends(listAddress, listValue),
-    batchSetExcludedFromDividends: () => c.batchSetExcludedFromDividends(parseAddressList($("batchListAddresses").value), listValue),
+    setExcludedFromDividends: () => dividendTarget.setExcludedFromDividends(listAddress, listValue),
+    batchSetExcludedFromDividends: () => dividendTarget.batchSetExcludedFromDividends(parseAddressList($("batchListAddresses").value), listValue),
     setExcludedFromFee: () => c.setExcludedFromFee(listAddress, listValue),
     lockFeeExemptions: () => c.lockFeeExemptions(),
     setBuyTax: () => c.setBuyTax(BigInt($("buyTax").value)),
@@ -1421,27 +1872,27 @@ async function adminAction(action) {
     setTaxShares: () => c.setTaxShares(BigInt($("marketingShare").value), BigInt($("burnShare").value), BigInt($("lpShare").value), BigInt($("dividendShare").value)),
     lockTaxes: () => c.lockTaxes(),
     setMarketingWallet: () => c.setMarketingWallet($("marketingWallet").value.trim()),
-    setRewardToken: () => c.setRewardToken($("rewardTokenAdmin").value.trim() || ZERO),
+    setRewardToken: () => dividendTarget.setRewardToken($("rewardTokenAdmin").value.trim() || ZERO),
     setSwapThreshold: () => c.setSwapThreshold(parseToken($("swapThreshold").value)),
     setBuyLimitEnabled: () => c.setBuyLimitEnabled(parseBool($("buyLimitEnabled").value)),
     setMaxBuyAmountPerWallet: () => c.setMaxBuyAmountPerWallet(parseToken($("maxBuyAmountPerWallet").value)),
     setBuyAmountLimitEnabled: () => c.setBuyAmountLimitEnabled(parseBool($("buyAmountLimitEnabled").value)),
     setMaxBuyBaseAmountPerWallet: () => c.setMaxBuyBaseAmountPerWallet(parseToken($("maxBuyBaseAmountPerWallet").value)),
-    setMinTokenDividendBalance: () => c.setMinTokenDividendBalance(parseToken($("minTokenDividendBalance").value)),
-    setAutoDividendEnabled: () => c.setAutoDividendEnabled(parseBool($("autoDividendEnabled").value)),
-    setAutoDividendBatchSize: () => c.setAutoDividendBatchSize(BigInt($("autoDividendBatchSize").value)),
+    setMinTokenDividendBalance: () => dividendTarget.setMinTokenDividendBalance(parseToken($("minTokenDividendBalance").value)),
+    setAutoDividendEnabled: () => dividendTarget.setAutoDividendEnabled(parseBool($("autoDividendEnabled").value)),
+    setAutoDividendBatchSize: () => dividendTarget.setAutoDividendBatchSize(BigInt($("autoDividendBatchSize").value)),
     forceSwapBack: () => c.forceSwapBack(),
     fundTokenDividend: async () => {
       const amount = parseToken($("dividendAmount").value);
-      if (reward.native) return c.fundTokenDividendBNB({ value: amount });
-      await approveIfNeeded(reward.address, contractAddress, amount, `${reward.symbol} 分红`);
-      return c.fundTokenDividendToken(amount);
+      if (reward.native) return dividendTarget.fundTokenDividendBNB({ value: amount });
+      await approveIfNeeded(reward.address, dividendTargetAddress, amount, `${reward.symbol} 分红`);
+      return dividendTarget.fundTokenDividendToken(amount);
     },
     fundLPDividend: async () => {
       const amount = parseToken($("lpDividendAmount").value);
-      if (reward.native) return c.fundLPDividendBNB({ value: amount });
-      await approveIfNeeded(reward.address, contractAddress, amount, `${reward.symbol} LP 分红`);
-      return c.fundLPDividendToken(amount);
+      if (reward.native) return dividendTarget.fundLPDividendBNB({ value: amount });
+      await approveIfNeeded(reward.address, dividendTargetAddress, amount, `${reward.symbol} LP 分红`);
+      return dividendTarget.fundLPDividendToken(amount);
     },
     forceAddLiquidity: async () => {
       const tokenAmount = parseToken($("liqTokenAmount").value);
@@ -1452,7 +1903,7 @@ async function adminAction(action) {
     },
     withdrawBNB: () => c.withdrawBNB($("withdrawBNBAmount").value ? parseToken($("withdrawBNBAmount").value) : 0n),
     withdrawToken: () => c.withdrawToken($("withdrawTokenAddress").value.trim(), $("withdrawTokenAmount").value ? parseToken($("withdrawTokenAmount").value) : 0n),
-    withdrawDividendReserve: () => c.withdrawDividendReserve($("withdrawDividendReserveAmount").value ? parseToken($("withdrawDividendReserveAmount").value) : 0n),
+    withdrawDividendReserve: () => dividendTarget.withdrawDividendReserve($("withdrawDividendReserveAmount").value ? parseToken($("withdrawDividendReserveAmount").value) : 0n),
     withdrawLP: () => c.withdrawLP($("withdrawLPAmount").value ? parseToken($("withdrawLPAmount").value) : 0n),
     renounceOwnership
   };

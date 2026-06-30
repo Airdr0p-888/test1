@@ -18,8 +18,8 @@ const TOKEN_ABI = [
   "function whitelist(address) view returns (bool)",
   "function pendingTokenDividend(address) view returns (uint256)",
   "function pendingLPDividend(address) view returns (uint256)",
-  "function dividendReserve() view returns (uint256)",
-  "function minTokenDividendBalance() view returns (uint256)",
+  "function dividendReserveView() view returns (uint256)",
+  "function minTokenDividendBalanceView() view returns (uint256)",
   "function mintBNB() payable",
   "function mintUSDT()",
   "function claimDividends()"

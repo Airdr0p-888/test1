@@ -7,6 +7,8 @@ const CLAIM_ABI = [
   "function pendingTokenDividend(address) view returns (uint256)",
   "function pendingLPDividend(address) view returns (uint256)",
   "function dividendReserve() view returns (uint256)",
+  "function dividendReserveView() view returns (uint256)",
+  "function isDividendExcluded(address) view returns (bool)",
   "function isExcludedFromDividends(address) view returns (bool)",
   "function claimDividends()"
 ];
@@ -155,7 +157,7 @@ async function loadContract() {
 
 async function refreshRewards() {
   if (!state.contract) return;
-  const reserve = await state.contract.dividendReserve();
+  const reserve = await state.contract.dividendReserveView().catch(() => state.contract.dividendReserve());
   $("dividendReserve").textContent = `${format(reserve)} ${state.rewardSymbol}`;
   if (!state.account) {
     $("claimDividends").disabled = true;
@@ -164,7 +166,7 @@ async function refreshRewards() {
   const [tokenPending, lpPending, excluded] = await Promise.all([
     state.contract.pendingTokenDividend(state.account),
     state.contract.pendingLPDividend(state.account),
-    state.contract.isExcludedFromDividends(state.account)
+    state.contract.isDividendExcluded(state.account).catch(() => state.contract.isExcludedFromDividends(state.account))
   ]);
   const total = tokenPending + lpPending;
   $("tokenPending").textContent = `${format(tokenPending)} ${state.rewardSymbol}`;
@@ -180,7 +182,7 @@ async function claim() {
   const [pendingToken, pendingLP, reserve] = await Promise.all([
     state.contract.pendingTokenDividend(state.account),
     state.contract.pendingLPDividend(state.account),
-    state.contract.dividendReserve()
+    state.contract.dividendReserveView().catch(() => state.contract.dividendReserve())
   ]);
   const total = pendingToken + pendingLP;
   if (total === 0n) throw new Error("当前钱包没有可领取分红");

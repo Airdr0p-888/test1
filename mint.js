@@ -18,7 +18,9 @@ const TOKEN_ABI = [
   "function pendingTokenDividend(address) view returns (uint256)",
   "function pendingLPDividend(address) view returns (uint256)",
   "function dividendReserve() view returns (uint256)",
+  "function dividendReserveView() view returns (uint256)",
   "function minTokenDividendBalance() view returns (uint256)",
+  "function minTokenDividendBalanceView() view returns (uint256)",
   "function mintBNB() payable",
   "function mintUSDT()",
   "function claimDividends()"
@@ -162,8 +164,8 @@ async function refreshContract() {
     state.contract.whitelistEnabled(),
     state.contract.pendingTokenDividend(state.account),
     state.contract.pendingLPDividend(state.account),
-    state.contract.dividendReserve(),
-    state.contract.minTokenDividendBalance()
+    state.contract.dividendReserveView().catch(() => state.contract.dividendReserve()),
+    state.contract.minTokenDividendBalanceView().catch(() => state.contract.minTokenDividendBalance())
   ]);
 
   state.tokenDecimals = Number(decimals);

@@ -93,6 +93,8 @@
               </div>
               <div id="taxShareHint" class="form-hint ok">税收分配合计 100%</div>
               <div class="grid share-extra">
+                <label>分红模式<select name="dividendMode"><option value="internal">内置分红</option><option value="external">独立分红合约</option></select></label>
+                <label>分红管理员钱包<input name="dividendOwner" placeholder="留空默认部署钱包" /></label>
                 <label>分红代币地址<input name="rewardToken" placeholder="留空=默认；BNB底池分USDT则填USDT地址" /></label>
                 <label>持币分红最低持仓<input name="minTokenDividendBalance" type="number" value="0" min="0" step="1" /></label>
               </div>
