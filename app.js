@@ -1411,7 +1411,8 @@ async function compileContract() {
     sources,
     settings: {
       viaIR: true,
-      optimizer: { enabled: true, runs: 200 },
+      optimizer: { enabled: true, runs: 1 },
+      metadata: { bytecodeHash: "none" },
       outputSelection: { "*": { "*": ["abi", "evm.bytecode.object"] } }
     }
   };
@@ -1564,7 +1565,7 @@ async function deployContract(form) {
     contractName: "FairMintTokenV1.sol:FairMintTokenV1",
     compilerVersion: "v0.8.24+commit.e11b9ed9",
     openZeppelinVersion: "5.0.2",
-    optimizer: { enabled: true, runs: 200, viaIR: true },
+    optimizer: { enabled: true, runs: 1, viaIR: true, bytecodeHash: "none" },
     constructorArguments: constructorArgs,
     constructorValues: args,
     dividendMode,
