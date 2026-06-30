@@ -1,0 +1,749 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Owner 通用管理控制台</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.jsdelivr.net/npm/ethers@6.7.1/dist/ethers.umd.min.js"></script>
+<style>
+  :root { --gold: #D4A017; --gold-dim: #B8860B; --dark: #0A0A0A; --dark2: #111; --dark3: #1a1a1a; }
+  body { background: #050505; color: #e0e0e0; font-family: 'Segoe UI', system-ui, sans-serif; }
+  .gold-text { color: var(--gold); }
+  .gold-border { border: 1px solid var(--gold); }
+  .gold-bg { background: var(--gold); color: #000; }
+  .card { background: var(--dark2); border: 1px solid #222; border-radius: 12px; padding: 1.5rem; margin-bottom: 1.5rem; }
+  .btn { border-radius: 8px; padding: 0.6rem 1.2rem; font-weight: 600; cursor: pointer; transition: all 0.2s; border: none; }
+  .btn-primary { background: var(--gold); color: #000; }
+  .btn-primary:hover { background: var(--gold-dim); }
+  .btn-danger { background: #c0392b; color: #fff; }
+  .btn-danger:hover { background: #a93226; }
+  .btn-secondary { background: #333; color: #fff; }
+  .btn-secondary:hover { background: #444; }
+  .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .log { background: #000; border: 1px solid #222; border-radius: 8px; padding: 1rem; font-family: monospace; font-size: 13px; max-height: 400px; overflow-y: auto; }
+  .log .info { color: #58f; }
+  .log .success { color: #2ecc71; }
+  .log .error { color: #e74c3c; }
+  .log .warn { color: var(--gold); }
+  .status-badge { display: inline-block; padding: 0.2rem 0.6rem; border-radius: 4px; font-size: 12px; font-weight: 600; }
+  .status-ok { background: #1e3a1e; color: #2ecc71; }
+  .status-warn { background: #3a2e1e; color: var(--gold); }
+  .status-err { background: #3a1e1e; color: #e74c3c; }
+  input[type="text"], input[type="number"], textarea, select { background: #000; border: 1px solid #333; color: #e0e0e0; padding: 0.5rem 0.8rem; border-radius: 6px; width: 100%; font-family: monospace; }
+  input:focus, textarea:focus, select:focus { outline: none; border-color: var(--gold); }
+  .label { font-size: 12px; color: #888; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 0.3rem; }
+  .value { font-family: monospace; font-size: 15px; color: #fff; word-break: break-all; }
+  .section-title { font-size: 1.1rem; font-weight: 700; color: var(--gold); margin-bottom: 1rem; border-bottom: 1px solid #222; padding-bottom: 0.5rem; }
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+  .grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 1rem; }
+  .grid-4 { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 1rem; }
+  @media (max-width: 768px) { .grid-2, .grid-3, .grid-4 { grid-template-columns: 1fr; } }
+  .collapsible { cursor: pointer; }
+  .collapsible-content { display: none; }
+  .collapsible-content.active { display: block; }
+  .auto-detect { color: #2ecc71; font-size: 12px; }
+  .manual-override { color: var(--gold); font-size: 12px; }
+</style>
+</head>
+<body class="min-h-screen p-4 md:p-8">
+<div class="max-w-6xl mx-auto">
+
+  <!-- Header -->
+  <div class="flex flex-col md:flex-row justify-between items-start md:items-center mb-8 gap-4">
+    <div>
+      <h1 class="text-2xl font-bold gold-text mb-1">Owner 通用管理控制台</h1>
+      <p class="text-sm text-gray-500">支持任意 BSC 代币合约 - 自动探测 Owner / Vault / LP</p>
+    </div>
+    <button id="connectBtn" class="btn btn-primary" onclick="connectWallet()">连接钱包</button>
+  </div>
+
+  <!-- Wallet Status -->
+  <div class="card" id="walletCard" style="display:none;">
+    <div class="grid-3">
+      <div>
+        <div class="label">已连接钱包</div>
+        <div class="value" id="walletAddress">-</div>
+      </div>
+      <div>
+        <div class="label">Owner 身份</div>
+        <div id="ownerStatus" class="status-badge status-err">未验证</div>
+      </div>
+      <div>
+        <div class="label">网络</div>
+        <div class="value" id="networkName">-</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Contract Address Input -->
+  <div class="card">
+    <div class="section-title">合约地址配置</div>
+    <div class="grid-2 mb-4">
+      <div>
+        <div class="label">代币合约地址 <span class="text-red-500">*</span></div>
+        <input type="text" id="tokenInput" placeholder="0x..." value="0x643be8d626e1c0ac78acb55ba7a02fcc6ce65555">
+      </div>
+      <div>
+        <div class="label">BSC RPC 节点</div>
+        <select id="rpcSelect">
+          <option value="https://bsc-dataseed.binance.org/">BSC 官方节点</option>
+          <option value="https://bsc-dataseed1.defibit.io/">Defibit 节点</option>
+          <option value="https://bsc-dataseed1.ninicoin.io/">Nini 节点</option>
+          <option value="https://rpc.ankr.com/bsc">Ankr BSC</option>
+          <option value="custom">自定义...</option>
+        </select>
+        <input type="text" id="customRpc" placeholder="https://..." style="display:none; margin-top:0.5rem;">
+      </div>
+    </div>
+    <div class="grid-2 mb-4">
+      <div>
+        <div class="label">Vault 地址 <span class="manual-override">(留空自动探测)</span></div>
+        <input type="text" id="vaultInput" placeholder="自动探测 fundAddress()">
+      </div>
+      <div>
+        <div class="label">LP Pair 地址 <span class="manual-override">(留空自动探测)</span></div>
+        <input type="text" id="pairInput" placeholder="自动探测 _mainPair()">
+      </div>
+    </div>
+    <div class="flex gap-2">
+      <button class="btn btn-primary" onclick="loadContract()" id="loadBtn">加载合约</button>
+      <button class="btn btn-secondary" onclick="autoDetect()" id="detectBtn" disabled>自动探测</button>
+    </div>
+  </div>
+
+  <!-- Contract Status -->
+  <div class="card" id="statusCard" style="display:none;">
+    <div class="section-title">合约状态</div>
+    <div class="grid-4" id="statusGrid">
+      <div><div class="label">代币名称</div><div class="value" id="s_name">-</div></div>
+      <div><div class="label">代币符号</div><div class="value" id="s_symbol">-</div></div>
+      <div><div class="label">总供应量</div><div class="value" id="s_totalSupply">-</div></div>
+      <div><div class="label">交易状态</div><div id="s_tradeStatus" class="status-badge status-warn">-</div></div>
+      <div><div class="label">代币合约余额</div><div class="value" id="s_tokenBal">-</div></div>
+      <div><div class="label">Vault LP 余额</div><div class="value" id="s_vaultLp">-</div></div>
+      <div><div class="label">LP 总供应量</div><div class="value" id="s_lpTotal">-</div></div>
+      <div><div class="label">Owner 地址</div><div class="value text-xs" id="s_owner">-</div></div>
+      <div><div class="label">配对储备 (Token)</div><div class="value" id="s_reserve0">-</div></div>
+      <div><div class="label">配对储备 (BNB)</div><div class="value" id="s_reserve1">-</div></div>
+      <div><div class="label">Vault 地址</div><div class="value text-xs" id="s_vault">-</div></div>
+      <div><div class="label">Pair 地址</div><div class="value text-xs" id="s_pair">-</div></div>
+    </div>
+    <div class="mt-4 flex gap-2">
+      <button class="btn btn-primary" onclick="refreshStatus()">刷新状态</button>
+    </div>
+  </div>
+
+  <!-- Actions -->
+  <div class="grid-2" id="actionsGrid" style="display:none;">
+
+    <!-- Launch -->
+    <div class="card">
+      <div class="section-title">1. 开启交易 (Launch)</div>
+      <p class="text-sm text-gray-400 mb-4">
+        调用 <code>launch()</code> 开启交易，将合约中所有剩余代币转给 Vault。
+        <br><span class="text-red-400">⚠️ 此操作不可逆，Owner 权限将转移给 0xdead。</span>
+      </p>
+      <div class="mb-3">
+        <div class="label">预计转给 Vault 的代币</div>
+        <div class="value" id="launchAmount">-</div>
+      </div>
+      <button id="launchBtn" class="btn btn-danger w-full" onclick="doLaunch()" disabled>开启交易</button>
+    </div>
+
+    <!-- Withdraw LP -->
+    <div class="card">
+      <div class="section-title">2. 提取 Vault LP</div>
+      <p class="text-sm text-gray-400 mb-4">
+        从 Vault 提取 LP 到指定地址。需要两步：先 <code>addShares</code>，再 <code>withdraw</code>。
+        <br><span class="text-yellow-400">⚠️ 如果交易已开启，Vault withdraw 可能已被锁定。</span>
+      </p>
+      <div class="mb-3">
+        <div class="label">接收地址</div>
+        <input type="text" id="withdrawTo" placeholder="0x...">
+      </div>
+      <div class="mb-3">
+        <div class="label">LP 份额 (shares)</div>
+        <input type="text" id="withdrawAmount" placeholder="如 100000000000000000">
+        <div class="text-xs text-gray-500 mt-1">Vault LP: <span id="vaultLpHint">-</span></div>
+      </div>
+      <div class="mb-3">
+        <div class="label">提取为</div>
+        <select id="withdrawToken" class="bg-black border border-gray-700 text-white rounded px-3 py-2 w-full text-sm">
+          <option value="0x0000000000000000000000000000000000000000">BNB (address(0))</option>
+          <option value="0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c">WBNB</option>
+        </select>
+      </div>
+      <div class="flex gap-2">
+        <button id="addSharesBtn" class="btn btn-primary flex-1" onclick="doAddShares()" disabled>步骤1: addShares</button>
+        <button id="withdrawBtn" class="btn btn-danger flex-1" onclick="doWithdraw()" disabled>步骤2: withdraw</button>
+      </div>
+    </div>
+
+    <!-- Custom Call -->
+    <div class="card">
+      <div class="section-title">3. 自定义合约调用</div>
+      <p class="text-sm text-gray-400 mb-4">
+        如果合约有特殊函数，可以在这里手动调用。需要输入函数签名和参数。
+      </p>
+      <div class="mb-3">
+        <div class="label">目标合约</div>
+        <select id="customTarget" class="bg-black border border-gray-700 text-white rounded px-3 py-2 w-full text-sm">
+          <option value="token">代币合约</option>
+          <option value="vault">Vault 合约</option>
+        </select>
+      </div>
+      <div class="mb-3">
+        <div class="label">函数名 (如: transfer(address,uint256))</div>
+        <input type="text" id="customFunction" placeholder="functionName(type1,type2)">
+      </div>
+      <div class="mb-3">
+        <div class="label">参数 (JSON 数组)</div>
+        <input type="text" id="customArgs" placeholder='["0x...", "1000000"]' value="[]">
+      </div>
+      <button id="customBtn" class="btn btn-secondary w-full" onclick="doCustomCall()" disabled>执行调用</button>
+    </div>
+
+    <!-- Direct Token Transfer -->
+    <div class="card">
+      <div class="section-title">4. 代币转账</div>
+      <p class="text-sm text-gray-400 mb-4">
+        如果合约中有可提取的代币，可以直接调用 <code>transfer</code> 转出（需要合约支持）。
+      </p>
+      <div class="mb-3">
+        <div class="label">接收地址</div>
+        <input type="text" id="transferTo" placeholder="0x...">
+      </div>
+      <div class="mb-3">
+        <div class="label">数量</div>
+        <input type="text" id="transferAmount" placeholder="1000000">
+      </div>
+      <button id="transferBtn" class="btn btn-secondary w-full" onclick="doTransfer()" disabled>发送代币</button>
+    </div>
+
+  </div>
+
+  <!-- ABI Override -->
+  <div class="card">
+    <div class="section-title collapsible" onclick="toggleAbi()">高级: 自定义 ABI (可选)</div>
+    <div class="collapsible-content" id="abiContent">
+      <p class="text-sm text-gray-400 mb-3">
+        如果自动探测失败，可以粘贴合约 ABI（JSON 格式）。留空则使用内置通用 ABI。
+      </p>
+      <div class="mb-3">
+        <div class="label">代币合约 ABI</div>
+        <textarea id="tokenAbiInput" rows="4" placeholder='[{"inputs":[],"name":"name","outputs":...]'></textarea>
+      </div>
+      <div class="mb-3">
+        <div class="label">Vault 合约 ABI</div>
+        <textarea id="vaultAbiInput" rows="4" placeholder='[{"inputs":[],"name":"creator","outputs":...]'></textarea>
+      </div>
+    </div>
+  </div>
+
+  <!-- Log -->
+  <div class="card">
+    <div class="section-title">操作日志</div>
+    <div class="log" id="logBox">
+      <div class="info">[系统] 等待连接钱包并加载合约...</div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+// ===== 通用 ABI =====
+const GENERIC_TOKEN_ABI = [
+  "function name() view returns (string)",
+  "function symbol() view returns (string)",
+  "function totalSupply() view returns (uint256)",
+  "function balanceOf(address) view returns (uint256)",
+  "function owner() view returns (address)",
+  "function decimals() view returns (uint8)",
+  "function transfer(address, uint256) returns (bool)",
+  "function transferFrom(address, address, uint256) returns (bool)",
+  "function approve(address, uint256) returns (bool)",
+  "function allowance(address, address) view returns (uint256)",
+  // LaunchToken 常见函数
+  "function startTradeBlock() view returns (uint256)",
+  "function startTradeTime() view returns (uint256)",
+  "function fundAddress() view returns (address)",
+  "function _mainPair() view returns (address)",
+  "function launch()",
+  "function openTrading()",
+  "function enableTrading()",
+  "function renounceOwnership()",
+  "function transferOwnership(address)",
+  "event Transfer(address indexed from, address indexed to, uint256 value)"
+];
+
+const GENERIC_VAULT_ABI = [
+  "function creator() view returns (address)",
+  "function addShares(address account, uint256 amount)",
+  "function withdraw(address account, uint256 amount, address lpToken, address token)",
+  "function markLaunched()",
+  "function burnToken(address erc20)",
+  "function recordMint(address account, uint256 amount)",
+  "function refundMint(address account, uint256 amount, address lpToken, address payToken) returns (uint256)",
+  "function totalShares() view returns (uint256)",
+  "function shares(address) view returns (uint256)"
+];
+
+const PAIR_ABI = [
+  "function balanceOf(address) view returns (uint256)",
+  "function totalSupply() view returns (uint256)",
+  "function getReserves() view returns (uint112 reserve0, uint112 reserve1, uint32 blockTimestampLast)",
+  "function token0() view returns (address)",
+  "function token1() view returns (address)",
+  "function approve(address, uint256) returns (bool)",
+  "function transfer(address, uint256) returns (bool)"
+];
+
+// ===== 状态 =====
+let provider, signer, userAddress;
+let tokenContract, vaultContract, pairContract;
+let isOwner = false;
+let currentConfig = {
+  token: '', vault: '', pair: '', rpc: '', owner: ''
+};
+
+// ===== 工具函数 =====
+function log(msg, type = 'info') {
+  const box = document.getElementById('logBox');
+  const div = document.createElement('div');
+  div.className = type;
+  div.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+  box.appendChild(div);
+  box.scrollTop = box.scrollHeight;
+}
+
+function toggleAbi() {
+  document.getElementById('abiContent').classList.toggle('active');
+}
+
+function getRpc() {
+  const sel = document.getElementById('rpcSelect').value;
+  if (sel === 'custom') return document.getElementById('customRpc').value;
+  return sel;
+}
+
+function parseAbiInput(id) {
+  const val = document.getElementById(id).value.trim();
+  if (!val) return null;
+  try { return JSON.parse(val); } catch (e) { return null; }
+}
+
+function getTokenAbi() {
+  const custom = parseAbiInput('tokenAbiInput');
+  return custom || GENERIC_TOKEN_ABI;
+}
+
+function getVaultAbi() {
+  const custom = parseAbiInput('vaultAbiInput');
+  return custom || GENERIC_VAULT_ABI;
+}
+
+// ===== 连接钱包 =====
+async function connectWallet() {
+  try {
+    if (!window.ethereum) { alert('请安装 MetaMask'); return; }
+    log('请求连接钱包...');
+
+    provider = new ethers.BrowserProvider(window.ethereum);
+    await provider.send('eth_requestAccounts', []);
+    signer = await provider.getSigner();
+    userAddress = await signer.getAddress();
+
+    const network = await provider.getNetwork();
+    if (Number(network.chainId) !== 56) {
+      log('需要切换至 BSC 主网...', 'warn');
+      try {
+        await window.ethereum.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: '0x38' }] });
+        provider = new ethers.BrowserProvider(window.ethereum);
+        signer = await provider.getSigner();
+        userAddress = await signer.getAddress();
+      } catch (e) {
+        log('切换网络失败', 'error'); return;
+      }
+    }
+
+    document.getElementById('walletCard').style.display = 'block';
+    document.getElementById('walletAddress').textContent = userAddress;
+    document.getElementById('networkName').textContent = 'BSC Mainnet';
+    document.getElementById('connectBtn').textContent = '已连接';
+    document.getElementById('connectBtn').disabled = true;
+    document.getElementById('detectBtn').disabled = false;
+
+    log(`钱包已连接: ${userAddress}`, 'success');
+
+    // 如果已有合约地址，自动加载
+    if (document.getElementById('tokenInput').value) {
+      await loadContract();
+    }
+  } catch (e) {
+    log('连接失败: ' + e.message, 'error');
+  }
+}
+
+// ===== 加载合约 =====
+async function loadContract() {
+  const tokenAddr = document.getElementById('tokenInput').value.trim();
+  if (!tokenAddr || !ethers.isAddress(tokenAddr)) {
+    log('请输入有效的代币合约地址', 'error'); return;
+  }
+
+  const rpc = getRpc();
+  if (!rpc) { log('请选择或输入 RPC 节点', 'error'); return; }
+
+  try {
+    log(`正在加载合约 ${tokenAddr}...`);
+    const readProvider = new ethers.JsonRpcProvider(rpc);
+    const tokenAbi = getTokenAbi();
+    const vaultAbi = getVaultAbi();
+
+    tokenContract = new ethers.Contract(tokenAddr, tokenAbi, readProvider);
+    currentConfig.token = tokenAddr;
+    currentConfig.rpc = rpc;
+
+    // 尝试读取基本信息
+    const [name, symbol, decimals] = await Promise.all([
+      tokenContract.name().catch(() => 'Unknown'),
+      tokenContract.symbol().catch(() => '???'),
+      tokenContract.decimals().catch(() => 18)
+    ]);
+
+    document.getElementById('s_name').textContent = name;
+    document.getElementById('s_symbol').textContent = symbol;
+    log(`代币: ${name} (${symbol})`, 'success');
+
+    // 自动探测 Vault 和 Pair
+    await autoDetectCore(readProvider, tokenAddr, vaultAbi);
+
+    // 如果有 signer，创建可写合约实例
+    if (signer) {
+      tokenContract = new ethers.Contract(tokenAddr, tokenAbi, signer);
+      if (currentConfig.vault) {
+        vaultContract = new ethers.Contract(currentConfig.vault, vaultAbi, signer);
+      }
+      if (currentConfig.pair) {
+        pairContract = new ethers.Contract(currentConfig.pair, PAIR_ABI, signer);
+      }
+      checkOwner();
+    }
+
+    document.getElementById('statusCard').style.display = 'block';
+    document.getElementById('actionsGrid').style.display = 'grid';
+    await refreshStatus();
+
+  } catch (e) {
+    log('加载合约失败: ' + e.message, 'error');
+  }
+}
+
+// ===== 自动探测 =====
+async function autoDetect() {
+  if (!currentConfig.token) { log('请先加载合约', 'error'); return; }
+  const rpc = getRpc();
+  const readProvider = new ethers.JsonRpcProvider(rpc);
+  await autoDetectCore(readProvider, currentConfig.token, getVaultAbi());
+  await refreshStatus();
+}
+
+async function autoDetectCore(readProvider, tokenAddr, vaultAbi) {
+  log('正在自动探测 Vault 和 Pair...');
+  const tempContract = new ethers.Contract(tokenAddr, GENERIC_TOKEN_ABI, readProvider);
+
+  // 探测 Owner
+  try {
+    const owner = await tempContract.owner();
+    currentConfig.owner = owner;
+    document.getElementById('s_owner').textContent = owner;
+    log(`探测到 Owner: ${owner}`);
+  } catch (e) {
+    log('未探测到 owner() 函数', 'warn');
+  }
+
+  // 探测 Vault (fundAddress)
+  let vaultAddr = document.getElementById('vaultInput').value.trim();
+  if (!vaultAddr) {
+    try {
+      vaultAddr = await tempContract.fundAddress();
+      log(`自动探测 Vault: ${vaultAddr}`, 'success');
+      document.getElementById('vaultInput').value = vaultAddr;
+    } catch (e) {
+      try {
+        vaultAddr = await tempContract.vault();
+        log(`自动探测 Vault: ${vaultAddr}`, 'success');
+        document.getElementById('vaultInput').value = vaultAddr;
+      } catch (e2) {
+        log('未探测到 Vault，请手动输入', 'warn');
+      }
+    }
+  }
+  if (vaultAddr && ethers.isAddress(vaultAddr)) {
+    currentConfig.vault = vaultAddr;
+    document.getElementById('s_vault').textContent = vaultAddr;
+  }
+
+  // 探测 Pair
+  let pairAddr = document.getElementById('pairInput').value.trim();
+  if (!pairAddr) {
+    try {
+      pairAddr = await tempContract._mainPair();
+      log(`自动探测 Pair: ${pairAddr}`, 'success');
+      document.getElementById('pairInput').value = pairAddr;
+    } catch (e) {
+      try {
+        pairAddr = await tempContract.pair();
+        log(`自动探测 Pair: ${pairAddr}`, 'success');
+        document.getElementById('pairInput').value = pairAddr;
+      } catch (e2) {
+        // 尝试从 factory 获取
+        try {
+          const wbnb = '0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c';
+          const factory = '0xcA143Ce32Fe78f1f7019d7d551a6402fC5350c73';
+          const factoryAbi = ["function getPair(address, address) view returns (address)"];
+          const factoryContract = new ethers.Contract(factory, factoryAbi, readProvider);
+          pairAddr = await factoryContract.getPair(tokenAddr, wbnb);
+          if (pairAddr !== '0x0000000000000000000000000000000000000000') {
+            log(`自动探测 Pair: ${pairAddr}`, 'success');
+            document.getElementById('pairInput').value = pairAddr;
+          }
+        } catch (e3) {
+          log('未探测到 Pair，请手动输入', 'warn');
+        }
+      }
+    }
+  }
+  if (pairAddr && ethers.isAddress(pairAddr) && pairAddr !== '0x0000000000000000000000000000000000000000') {
+    currentConfig.pair = pairAddr;
+    document.getElementById('s_pair').textContent = pairAddr;
+  }
+
+  // 创建 Vault 和 Pair 合约实例
+  if (currentConfig.vault) {
+    vaultContract = new ethers.Contract(currentConfig.vault, vaultAbi, readProvider);
+  }
+  if (currentConfig.pair) {
+    pairContract = new ethers.Contract(currentConfig.pair, PAIR_ABI, readProvider);
+  }
+}
+
+// ===== 检查 Owner =====
+async function checkOwner() {
+  if (!signer || !currentConfig.owner) return;
+  isOwner = currentConfig.owner.toLowerCase() === userAddress.toLowerCase();
+  const badge = document.getElementById('ownerStatus');
+  if (isOwner) {
+    badge.textContent = '✓ 是 Owner';
+    badge.className = 'status-badge status-ok';
+    log('当前钱包是 Owner', 'success');
+  } else {
+    badge.textContent = '✗ 不是 Owner';
+    badge.className = 'status-badge status-err';
+    log('当前钱包不是 Owner', 'warn');
+  }
+  updateButtons();
+}
+
+function updateButtons() {
+  const disabled = !isOwner;
+  ['launchBtn', 'addSharesBtn', 'withdrawBtn', 'customBtn', 'transferBtn'].forEach(id => {
+    document.getElementById(id).disabled = disabled;
+  });
+}
+
+// ===== 刷新状态 =====
+async function refreshStatus() {
+  if (!tokenContract) return;
+  try {
+    log('刷新状态...');
+    const tokenAddr = currentConfig.token;
+    const decimals = await tokenContract.decimals().catch(() => 18);
+
+    const calls = [
+      tokenContract.startTradeBlock().catch(() => 0),
+      tokenContract.balanceOf(tokenAddr).catch(() => 0),
+      tokenContract.totalSupply().catch(() => 0)
+    ];
+
+    if (pairContract) {
+      calls.push(pairContract.balanceOf(currentConfig.vault || '0x0').catch(() => 0));
+      calls.push(pairContract.totalSupply().catch(() => 0));
+      calls.push(pairContract.getReserves().catch(() => [0, 0]));
+      calls.push(pairContract.token0().catch(() => ''));
+      calls.push(pairContract.token1().catch(() => ''));
+    }
+
+    const results = await Promise.all(calls);
+    let idx = 0;
+
+    const startTradeBlock = results[idx++];
+    const tokenBal = results[idx++];
+    const totalSupply = results[idx++];
+
+    const tradeStatus = document.getElementById('s_tradeStatus');
+    if (Number(startTradeBlock) > 0) {
+      tradeStatus.textContent = '已开启';
+      tradeStatus.className = 'status-badge status-ok';
+    } else {
+      tradeStatus.textContent = '未开启';
+      tradeStatus.className = 'status-badge status-warn';
+    }
+
+    document.getElementById('s_totalSupply').textContent = ethers.formatUnits(totalSupply, decimals);
+    document.getElementById('s_tokenBal').textContent = ethers.formatUnits(tokenBal, decimals);
+    document.getElementById('launchAmount').textContent = ethers.formatUnits(tokenBal, decimals) + ' ' + (document.getElementById('s_symbol').textContent || '');
+
+    if (pairContract) {
+      const vaultLp = results[idx++];
+      const lpTotal = results[idx++];
+      const reserves = results[idx++];
+      const token0 = results[idx++];
+      const token1 = results[idx++];
+
+      document.getElementById('s_vaultLp').textContent = ethers.formatUnits(vaultLp, 18);
+      document.getElementById('s_lpTotal').textContent = ethers.formatUnits(lpTotal, 18);
+      document.getElementById('vaultLpHint').textContent = ethers.formatUnits(vaultLp, 18);
+
+      const tokenAddrLower = tokenAddr.toLowerCase();
+      let r0, r1;
+      if (token0.toLowerCase() === tokenAddrLower) { r0 = reserves[0]; r1 = reserves[1]; }
+      else { r0 = reserves[1]; r1 = reserves[0]; }
+      document.getElementById('s_reserve0').textContent = ethers.formatUnits(r0, decimals);
+      document.getElementById('s_reserve1').textContent = ethers.formatEther(r1) + ' BNB';
+    }
+
+    log('状态刷新完成', 'success');
+  } catch (e) {
+    log('刷新失败: ' + e.message, 'error');
+  }
+}
+
+// ===== 操作: Launch =====
+async function doLaunch() {
+  if (!isOwner) { log('只有 Owner 可执行', 'error'); return; }
+  if (!confirm('确认开启交易？\n\n⚠️ 此操作不可逆！')) return;
+  try {
+    log('发送 launch()...');
+    const tx = await tokenContract.launch();
+    log(`TX: ${tx.hash}`, 'info');
+    await tx.wait();
+    log('launch 成功!', 'success');
+    await refreshStatus();
+  } catch (e) {
+    log('launch 失败: ' + (e.reason || e.message), 'error');
+  }
+}
+
+// ===== 操作: AddShares =====
+async function doAddShares() {
+  if (!isOwner) { log('只有 Owner 可执行', 'error'); return; }
+  if (!vaultContract) { log('Vault 未加载', 'error'); return; }
+  const to = document.getElementById('withdrawTo').value.trim() || currentConfig.owner;
+  const amount = document.getElementById('withdrawAmount').value.trim();
+  if (!ethers.isAddress(to)) { log('无效地址', 'error'); return; }
+  if (!amount) { log('请输入数量', 'error'); return; }
+  try {
+    log(`addShares(${to}, ${amount})...`);
+    const tx = await vaultContract.addShares(to, amount);
+    log(`TX: ${tx.hash}`, 'info');
+    await tx.wait();
+    log('addShares 成功!', 'success');
+  } catch (e) {
+    log('addShares 失败: ' + (e.reason || e.message), 'error');
+  }
+}
+
+// ===== 操作: Withdraw =====
+async function doWithdraw() {
+  if (!isOwner) { log('只有 Owner 可执行', 'error'); return; }
+  if (!vaultContract) { log('Vault 未加载', 'error'); return; }
+  const to = document.getElementById('withdrawTo').value.trim() || currentConfig.owner;
+  const amount = document.getElementById('withdrawAmount').value.trim();
+  const token = document.getElementById('withdrawToken').value;
+  if (!ethers.isAddress(to)) { log('无效地址', 'error'); return; }
+  if (!amount) { log('请输入数量', 'error'); return; }
+  try {
+    log(`withdraw(${to}, ${amount}, ${currentConfig.pair}, ${token})...`);
+    const tx = await vaultContract.withdraw(to, amount, currentConfig.pair, token);
+    log(`TX: ${tx.hash}`, 'info');
+    await tx.wait();
+    log('withdraw 成功!', 'success');
+    await refreshStatus();
+  } catch (e) {
+    log('withdraw 失败: ' + (e.reason || e.message), 'error');
+  }
+}
+
+// ===== 操作: Custom Call =====
+async function doCustomCall() {
+  if (!isOwner) { log('只有 Owner 可执行', 'error'); return; }
+  const target = document.getElementById('customTarget').value;
+  const func = document.getElementById('customFunction').value.trim();
+  const argsStr = document.getElementById('customArgs').value.trim();
+  if (!func) { log('请输入函数签名', 'error'); return; }
+
+  let contract = target === 'token' ? tokenContract : vaultContract;
+  if (!contract) { log('合约未加载', 'error'); return; }
+
+  try {
+    const args = argsStr ? JSON.parse(argsStr) : [];
+    log(`调用 ${func}(${args.map(a => typeof a === 'string' && a.startsWith('0x') ? a.slice(0,10)+'...' : a).join(', ')})...`);
+
+    // 动态调用
+    const funcParts = func.match(/^(\w+)\((.*)\)$/);
+    if (!funcParts) {
+      // 简单函数名
+      const tx = await contract[func](...args);
+      log(`TX: ${tx.hash}`, 'info');
+      await tx.wait();
+      log('调用成功!', 'success');
+    } else {
+      const funcName = funcParts[1];
+      const tx = await contract[funcName](...args);
+      log(`TX: ${tx.hash}`, 'info');
+      await tx.wait();
+      log('调用成功!', 'success');
+    }
+  } catch (e) {
+    log('调用失败: ' + (e.reason || e.message), 'error');
+  }
+}
+
+// ===== 操作: Transfer =====
+async function doTransfer() {
+  if (!isOwner) { log('只有 Owner 可执行', 'error'); return; }
+  const to = document.getElementById('transferTo').value.trim();
+  const amount = document.getElementById('transferAmount').value.trim();
+  if (!ethers.isAddress(to)) { log('无效地址', 'error'); return; }
+  if (!amount) { log('请输入数量', 'error'); return; }
+  try {
+    const decimals = await tokenContract.decimals().catch(() => 18);
+    const value = ethers.parseUnits(amount, decimals);
+    log(`transfer(${to}, ${value})...`);
+    const tx = await tokenContract.transfer(to, value);
+    log(`TX: ${tx.hash}`, 'info');
+    await tx.wait();
+    log('转账成功!', 'success');
+  } catch (e) {
+    log('转账失败: ' + (e.reason || e.message), 'error');
+  }
+}
+
+// ===== 事件监听 =====
+document.getElementById('rpcSelect').addEventListener('change', function() {
+  document.getElementById('customRpc').style.display = this.value === 'custom' ? 'block' : 'none';
+});
+
+if (window.ethereum) {
+  window.ethereum.on('accountsChanged', () => location.reload());
+  window.ethereum.on('chainChanged', () => location.reload());
+}
+
+// 初始化默认值
+document.getElementById('withdrawTo').value = '';
+log('页面已加载。请连接钱包并加载合约。', 'info');
+</script>
+</body>
+</html>
