@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>GOLDLAUNCH 发射台</title>
     <link rel="stylesheet" href="./styles.css" />
-    <script type="module" src="./app.js?v=20260628-sell-tax-supply-limit"></script>
+    <script type="module" src="./app.js?v=20260630-launch-price-planner"></script>
   </head>
   <body>
     <div class="shell">
@@ -66,7 +66,9 @@
                 <label>最大 Mint 次数<input name="maxMintCount" type="number" value="1000" min="1" required /></label>
                 <label>用户拿到代币比例 %<input name="userMintShare" type="number" value="70" min="0" max="100" step="0.01" required /></label>
                 <label>进入流动性的募集资金 %<input name="lpFundShare" type="number" value="80" min="0" max="100" step="0.01" required /></label>
+                <label>目标开盘单价<input name="targetLaunchPrice" type="text" inputmode="decimal" placeholder="输入后自动计算单次Mint代币数" /><small id="targetLaunchPriceCurrency">BNB/枚</small></label>
               </div>
+              <div id="targetLaunchPriceHint" class="form-hint"></div>
               <div id="deployHints" class="mini-stats"></div>
             </fieldset>
 
@@ -187,10 +189,12 @@
               <button data-action="setWhitelist">白名单</button>
               <button data-action="setBuyWhitelist">买入白名单</button>
               <button data-action="setPreLaunchBuyWhitelist">开盘前买入白名单</button>
+              <button data-action="setExcludedFromDividends">分红排除名单</button>
               <textarea id="batchListAddresses" rows="6" placeholder="批量地址，一行一个"></textarea>
               <button data-action="batchSetWhitelist">批量白名单</button>
               <button data-action="batchSetBuyWhitelist">批量买入白名单</button>
               <button data-action="batchSetPreLaunchBuyWhitelist">批量开盘前买入白名单</button>
+              <button data-action="batchSetExcludedFromDividends">批量分红排除名单</button>
               <button data-action="setExcludedFromFee">手续费排除</button>
               <button data-action="lockFeeExemptions">锁定免税名单</button>
             </article>

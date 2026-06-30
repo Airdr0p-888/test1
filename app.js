@@ -90,6 +90,10 @@ contract FairMintTokenV1 is ERC20, Ownable, Pausable, ReentrancyGuard {
     uint256 public dividendReserve;
     uint256 public minTokenDividendBalance;
     uint256 private constant ACC = 1e36;
+    mapping(address => bool) public isExcludedFromDividends;
+    mapping(address => bool) private dividendExclusionKnown;
+    address[] public dividendExcludedAddresses;
+    uint256 public excludedTokenBalance;
     mapping(address => uint256) public tokenDividendDebt;
     mapping(address => uint256) public tokenDividendCredit;
     mapping(address => uint256) public lpDividendDebt;
@@ -163,6 +167,11 @@ contract FairMintTokenV1 is ERC20, Ownable, Pausable, ReentrancyGuard {
         buyWhitelist[address(this)] = true;
         buyWhitelist[router_] = true;
         preLaunchBuyWhitelist[owner_] = true;
+        _setExcludedFromDividends(address(0), true);
+        _setExcludedFromDividends(deadWallet, true);
+        _setExcludedFromDividends(address(this), true);
+        _setExcludedFromDividends(pair, true);
+        _setExcludedFromDividends(router_, true);
     }
     receive() external payable nonReentrant whenNotPaused { if (msg.sender == address(router)) return; _mintBNB(msg.sender, msg.value); }
     function decimals() public pure override returns (uint8) { return 18; }
@@ -186,7 +195,7 @@ contract FairMintTokenV1 is ERC20, Ownable, Pausable, ReentrancyGuard {
         if (mintedCount >= maxMintCount) { mintEnabled = false; if (launchMode == LaunchMode.AUTO) _openTrading(); }
     }
     function _update(address from, address to, uint256 amount) internal override {
-        if (from == address(0) || to == address(0)) { super._update(from, to, amount); return; }
+        if (from == address(0) || to == address(0)) { _updateExcludedTokenBalance(from, to, amount); super._update(from, to, amount); return; }
         uint256 grossAmount = amount;
         if (!tradingOpen && launchMode == LaunchMode.TIME && launchTime > 0 && block.timestamp >= launchTime) { tradingOpen = true; emit TradingOpened(block.timestamp); }
         bool exemptLimit = isExcludedFromLimits[from] || isExcludedFromLimits[to];
@@ -198,11 +207,16 @@ contract FairMintTokenV1 is ERC20, Ownable, Pausable, ReentrancyGuard {
             uint256 taxRate; if (from == pair) taxRate = buyTax; else if (to == pair) taxRate = sellTax; else taxRate = transferTax;
             if (taxRate > 0) taxAmount = amount * taxRate / DENOMINATOR;
         }
-        if (taxAmount > 0) { super._update(from, address(this), taxAmount); pendingTaxTokens += taxAmount; amount -= taxAmount; }
+        if (taxAmount > 0) { _updateExcludedTokenBalance(from, address(this), taxAmount); super._update(from, address(this), taxAmount); pendingTaxTokens += taxAmount; amount -= taxAmount; }
         if (from == pair && buyWhitelistEnabled && !preLaunchBuy) require(buyWhitelist[to], "buy whitelist");
         if (buyLimitEnabled && from == pair && !isExcludedFromLimits[to]) { boughtAmount[to] += amount; require(boughtAmount[to] <= maxBuyAmountPerWallet, "buy limit"); }
         if (buyAmountLimitEnabled && from == pair && !isExcludedFromLimits[to]) { boughtBaseAmount[to] += _baseAmountForBuy(grossAmount); require(boughtBaseAmount[to] <= maxBuyBaseAmountPerWallet, "buy amount limit"); }
-        _accrueTokenDividend(from); _accrueTokenDividend(to); super._update(from, to, amount); _settleTokenDividend(from); _settleTokenDividend(to); _trackDividendHolder(from); _trackDividendHolder(to);
+        _accrueTokenDividend(from); _accrueTokenDividend(to); _updateExcludedTokenBalance(from, to, amount); super._update(from, to, amount); _settleTokenDividend(from); _settleTokenDividend(to); _trackDividendHolder(from); _trackDividendHolder(to);
+    }
+    function _updateExcludedTokenBalance(address from, address to, uint256 amount) internal {
+        if (amount == 0 || from == to) return;
+        if (from != address(0) && isExcludedFromDividends[from]) excludedTokenBalance -= amount;
+        if (to != address(0) && isExcludedFromDividends[to]) excludedTokenBalance += amount;
     }
     function _baseAmountForBuy(uint256 tokenAmountOut) internal view returns (uint256) {
         IPancakePairV2 mainPair = IPancakePairV2(pair);
@@ -226,7 +240,7 @@ contract FairMintTokenV1 is ERC20, Ownable, Pausable, ReentrancyGuard {
         uint256 lpTokens = tokenAmount * lpShare / totalShare;
         uint256 dividendTokens = tokenAmount * dividendShare / totalShare;
         uint256 marketingTokens = tokenAmount - burnTokens - lpTokens - dividendTokens;
-        if (burnTokens > 0) super._update(address(this), deadWallet, burnTokens);
+        if (burnTokens > 0) { _updateExcludedTokenBalance(address(this), deadWallet, burnTokens); super._update(address(this), deadWallet, burnTokens); }
         uint256 lpTokenHalf = lpTokens / 2;
         uint256 tokensToSwap = marketingTokens + dividendTokens + lpTokenHalf;
         uint256 received;
@@ -266,23 +280,36 @@ contract FairMintTokenV1 is ERC20, Ownable, Pausable, ReentrancyGuard {
         else { IERC20(usdtAddress).forceApprove(address(router), amount); address[] memory path = new address[](3); path[0] = usdtAddress; path[1] = router.WETH(); path[2] = target; router.swapExactTokensForTokensSupportingFeeOnTransferTokens(amount, 0, path, address(this), block.timestamp); }
         return IERC20(target).balanceOf(address(this)) - beforeBal;
     }
-    function _fundTokenDividendFromSwap(uint256 baseAmount) internal { if (baseAmount == 0) return; uint256 rewardAmount = _isNativeReward() ? baseAmount : _convertBaseToReward(baseAmount); uint256 circulating = totalSupply() - balanceOf(address(this)); if (circulating == 0) { _sendReward(marketingWallet, rewardAmount); return; } dividendReserve += rewardAmount; tokenDividendPerShare += rewardAmount * ACC / circulating; emit TokenDividendFunded(rewardAmount); }
+    function eligibleTokenDividendSupply() public view returns (uint256) { return totalSupply() - excludedTokenBalance; }
+    function eligibleLPDividendSupply() public view returns (uint256) {
+        uint256 supply = IERC20(pair).totalSupply();
+        for (uint256 i; i < dividendExcludedAddresses.length; i++) {
+            address user = dividendExcludedAddresses[i];
+            if (!isExcludedFromDividends[user]) continue;
+            uint256 excludedLP = IERC20(pair).balanceOf(user);
+            if (excludedLP >= supply) return 0;
+            supply -= excludedLP;
+        }
+        return supply;
+    }
+    function dividendExcludedCount() external view returns (uint256) { return dividendExcludedAddresses.length; }
+    function _fundTokenDividendFromSwap(uint256 baseAmount) internal { if (baseAmount == 0) return; uint256 rewardAmount = _isNativeReward() ? baseAmount : _convertBaseToReward(baseAmount); uint256 circulating = eligibleTokenDividendSupply(); if (circulating == 0) { _sendReward(marketingWallet, rewardAmount); return; } dividendReserve += rewardAmount; tokenDividendPerShare += rewardAmount * ACC / circulating; emit TokenDividendFunded(rewardAmount); }
     function fundTokenDividendBNB() external payable onlyOwner { require(_isNativeReward(), "not native reward"); _fundTokenDividendManual(msg.value); }
     function fundTokenDividendToken(uint256 amount) public onlyOwner { require(!_isNativeReward(), "native reward"); IERC20(rewardTokenAddress()).safeTransferFrom(msg.sender, address(this), amount); _fundTokenDividendManual(amount); }
     function fundTokenDividendUSDT(uint256 amount) external onlyOwner { require(rewardTokenAddress() == usdtAddress, "not USDT reward"); fundTokenDividendToken(amount); }
-    function _fundTokenDividendManual(uint256 amount) internal { require(totalSupply() > balanceOf(address(this)), "no circulating supply"); dividendReserve += amount; tokenDividendPerShare += amount * ACC / (totalSupply() - balanceOf(address(this))); emit TokenDividendFunded(amount); }
+    function _fundTokenDividendManual(uint256 amount) internal { uint256 circulating = eligibleTokenDividendSupply(); require(circulating > 0, "no circulating supply"); dividendReserve += amount; tokenDividendPerShare += amount * ACC / circulating; emit TokenDividendFunded(amount); }
     function fundLPDividendBNB() external payable onlyOwner { require(_isNativeReward(), "not native reward"); _fundLPDividendManual(msg.value); }
     function fundLPDividendToken(uint256 amount) public onlyOwner { require(!_isNativeReward(), "native reward"); IERC20(rewardTokenAddress()).safeTransferFrom(msg.sender, address(this), amount); _fundLPDividendManual(amount); }
     function fundLPDividendUSDT(uint256 amount) external onlyOwner { require(rewardTokenAddress() == usdtAddress, "not USDT reward"); fundLPDividendToken(amount); }
-    function _fundLPDividendManual(uint256 amount) internal { uint256 lpSupply = IERC20(pair).totalSupply(); require(lpSupply > 0, "no lp supply"); dividendReserve += amount; lpDividendPerShare += amount * ACC / lpSupply; emit LPDividendFunded(amount); }
-    function claimDividends() external nonReentrant { uint256 tokenReward = pendingTokenDividend(msg.sender); uint256 lpReward = pendingLPDividend(msg.sender); uint256 reward = tokenReward + lpReward; tokenDividendCredit[msg.sender] = 0; tokenDividendDebt[msg.sender] = balanceOf(msg.sender) * tokenDividendPerShare / ACC; lpBalanceSnapshot[msg.sender] = IERC20(pair).balanceOf(msg.sender); lpDividendDebt[msg.sender] = lpBalanceSnapshot[msg.sender] * lpDividendPerShare / ACC; if (reward > 0) { require(dividendReserve >= reward, "dividend reserve"); dividendReserve -= reward; _sendReward(msg.sender, reward); } emit DividendClaimed(msg.sender, tokenReward, lpReward); }
+    function _fundLPDividendManual(uint256 amount) internal { uint256 lpSupply = eligibleLPDividendSupply(); require(lpSupply > 0, "no lp supply"); dividendReserve += amount; lpDividendPerShare += amount * ACC / lpSupply; emit LPDividendFunded(amount); }
+    function claimDividends() external nonReentrant { require(!isExcludedFromDividends[msg.sender], "dividend excluded"); uint256 tokenReward = pendingTokenDividend(msg.sender); uint256 lpReward = pendingLPDividend(msg.sender); uint256 reward = tokenReward + lpReward; tokenDividendCredit[msg.sender] = 0; tokenDividendDebt[msg.sender] = balanceOf(msg.sender) * tokenDividendPerShare / ACC; lpBalanceSnapshot[msg.sender] = IERC20(pair).balanceOf(msg.sender); lpDividendDebt[msg.sender] = lpBalanceSnapshot[msg.sender] * lpDividendPerShare / ACC; if (reward > 0) { require(dividendReserve >= reward, "dividend reserve"); dividendReserve -= reward; _sendReward(msg.sender, reward); } emit DividendClaimed(msg.sender, tokenReward, lpReward); }
     function dividendHolderCount() external view returns (uint256) { return dividendHolders.length; }
-    function pendingTokenDividend(address user) public view returns (uint256) { uint256 pending = tokenDividendCredit[user]; if (balanceOf(user) < minTokenDividendBalance) return pending; uint256 accumulated = balanceOf(user) * tokenDividendPerShare / ACC; if (accumulated > tokenDividendDebt[user]) pending += accumulated - tokenDividendDebt[user]; return pending; }
-    function pendingLPDividend(address user) public view returns (uint256) { uint256 lpBal = IERC20(pair).balanceOf(user); uint256 accumulated = lpBal * lpDividendPerShare / ACC; if (accumulated <= lpDividendDebt[user]) return 0; return accumulated - lpDividendDebt[user]; }
-    function syncLPDividendDebt() external { lpBalanceSnapshot[msg.sender] = IERC20(pair).balanceOf(msg.sender); lpDividendDebt[msg.sender] = lpBalanceSnapshot[msg.sender] * lpDividendPerShare / ACC; }
-    function _accrueTokenDividend(address user) internal { uint256 pending = pendingTokenDividend(user); if (pending > tokenDividendCredit[user]) tokenDividendCredit[user] = pending; tokenDividendDebt[user] = balanceOf(user) * tokenDividendPerShare / ACC; }
-    function _settleTokenDividend(address user) internal { tokenDividendDebt[user] = balanceOf(user) * tokenDividendPerShare / ACC; }
-    function _trackDividendHolder(address user) internal { if (user == address(0) || user == address(this) || user == pair || user == address(router) || user == deadWallet || isDividendHolder[user]) return; uint256 bal = balanceOf(user); if (bal > 0 && bal >= minTokenDividendBalance) { isDividendHolder[user] = true; dividendHolders.push(user); } }
+    function pendingTokenDividend(address user) public view returns (uint256) { if (isExcludedFromDividends[user]) return 0; uint256 pending = tokenDividendCredit[user]; if (balanceOf(user) < minTokenDividendBalance) return pending; uint256 accumulated = balanceOf(user) * tokenDividendPerShare / ACC; if (accumulated > tokenDividendDebt[user]) pending += accumulated - tokenDividendDebt[user]; return pending; }
+    function pendingLPDividend(address user) public view returns (uint256) { if (isExcludedFromDividends[user]) return 0; uint256 lpBal = IERC20(pair).balanceOf(user); uint256 accumulated = lpBal * lpDividendPerShare / ACC; if (accumulated <= lpDividendDebt[user]) return 0; return accumulated - lpDividendDebt[user]; }
+    function syncLPDividendDebt() external { if (isExcludedFromDividends[msg.sender]) { lpBalanceSnapshot[msg.sender] = 0; lpDividendDebt[msg.sender] = 0; return; } lpBalanceSnapshot[msg.sender] = IERC20(pair).balanceOf(msg.sender); lpDividendDebt[msg.sender] = lpBalanceSnapshot[msg.sender] * lpDividendPerShare / ACC; }
+    function _accrueTokenDividend(address user) internal { if (isExcludedFromDividends[user]) { tokenDividendCredit[user] = 0; tokenDividendDebt[user] = 0; return; } uint256 pending = pendingTokenDividend(user); if (pending > tokenDividendCredit[user]) tokenDividendCredit[user] = pending; tokenDividendDebt[user] = balanceOf(user) * tokenDividendPerShare / ACC; }
+    function _settleTokenDividend(address user) internal { tokenDividendDebt[user] = isExcludedFromDividends[user] ? 0 : balanceOf(user) * tokenDividendPerShare / ACC; }
+    function _trackDividendHolder(address user) internal { if (isExcludedFromDividends[user] || isDividendHolder[user]) return; uint256 bal = balanceOf(user); if (bal > 0 && bal >= minTokenDividendBalance) { isDividendHolder[user] = true; dividendHolders.push(user); } }
     function _processAutoDividends(uint256 maxCount) internal {
         uint256 total = dividendHolders.length;
         if (total == 0 || maxCount == 0 || dividendReserve == 0) return;
@@ -294,7 +321,7 @@ contract FairMintTokenV1 is ERC20, Ownable, Pausable, ReentrancyGuard {
             address user = dividendHolders[dividendProcessIndex];
             dividendProcessIndex += 1;
             iterations += 1;
-            if (balanceOf(user) < minTokenDividendBalance) continue;
+            if (isExcludedFromDividends[user] || balanceOf(user) < minTokenDividendBalance) continue;
             uint256 tokenReward = pendingTokenDividend(user);
             uint256 lpReward = pendingLPDividend(user);
             uint256 reward = tokenReward + lpReward;
@@ -337,6 +364,27 @@ contract FairMintTokenV1 is ERC20, Ownable, Pausable, ReentrancyGuard {
     function setPreLaunchBuyWhitelistEnabled(bool v) external onlyOwner { preLaunchBuyWhitelistEnabled = v; }
     function setPreLaunchBuyWhitelist(address user, bool v) external onlyOwner { require(user != address(0), "zero address"); preLaunchBuyWhitelist[user] = v; }
     function batchSetPreLaunchBuyWhitelist(address[] calldata users, bool v) external onlyOwner { for (uint i; i < users.length; i++) { require(users[i] != address(0), "zero address"); preLaunchBuyWhitelist[users[i]] = v; } }
+    function _isCoreDividendExcluded(address user) internal view returns (bool) { return user == address(0) || user == deadWallet || user == address(this) || user == pair || user == address(router); }
+    function _setExcludedFromDividends(address user, bool v) internal {
+        if (isExcludedFromDividends[user] == v) return;
+        if (v) {
+            isExcludedFromDividends[user] = true;
+            excludedTokenBalance += balanceOf(user);
+            tokenDividendCredit[user] = 0;
+            tokenDividendDebt[user] = 0;
+            lpBalanceSnapshot[user] = 0;
+            lpDividendDebt[user] = 0;
+            if (!dividendExclusionKnown[user]) { dividendExclusionKnown[user] = true; dividendExcludedAddresses.push(user); }
+        } else {
+            isExcludedFromDividends[user] = false;
+            excludedTokenBalance -= balanceOf(user);
+            tokenDividendDebt[user] = balanceOf(user) * tokenDividendPerShare / ACC;
+            lpBalanceSnapshot[user] = IERC20(pair).balanceOf(user);
+            lpDividendDebt[user] = lpBalanceSnapshot[user] * lpDividendPerShare / ACC;
+        }
+    }
+    function setExcludedFromDividends(address user, bool v) external onlyOwner { if (!v) require(!_isCoreDividendExcluded(user), "core dividend exclusion"); _setExcludedFromDividends(user, v); }
+    function batchSetExcludedFromDividends(address[] calldata users, bool v) external onlyOwner { for (uint256 i; i < users.length; i++) { if (!v) require(!_isCoreDividendExcluded(users[i]), "core dividend exclusion"); _setExcludedFromDividends(users[i], v); } }
     function setMinTokenDividendBalance(uint256 v) external onlyOwner { minTokenDividendBalance = v; }
     function setAutoDividendEnabled(bool v) external onlyOwner { autoDividendEnabled = v; }
     function setAutoDividendBatchSize(uint256 v) external onlyOwner { require(v > 0 && v <= 20, "bad batch"); autoDividendBatchSize = v; }
@@ -516,6 +564,63 @@ function formatNumber(value) {
   return value.toLocaleString("en-US", { maximumFractionDigits: 6 });
 }
 
+function formatBigIntRatio(numerator, denominator, precision = 30) {
+  if (denominator <= 0n || numerator < 0n) return "-";
+  const integer = numerator / denominator;
+  const remainder = numerator % denominator;
+  if (remainder === 0n) return integer.toString();
+  const scale = 10n ** BigInt(precision);
+  const fraction = (remainder * scale / denominator).toString().padStart(precision, "0").replace(/0+$/, "");
+  return fraction ? `${integer}.${fraction}` : integer.toString();
+}
+
+function launchPriceDetails(form) {
+  const mintPriceRaw = parseToken(form.elements.mintPrice.value);
+  const tokenPerMintRaw = parseToken(form.elements.tokenPerMint.value);
+  const userShareBp = percentToBp(form.elements.userMintShare.value);
+  const lpFundShareBp = percentToBp(form.elements.lpFundShare.value);
+  const lpFundRaw = mintPriceRaw * lpFundShareBp / 10000n;
+  const lpTokenRaw = tokenPerMintRaw * (10000n - userShareBp) / 10000n;
+  const defaults = activeNetworkDefaults();
+  const currency = Number(form.elements.mintMode.value) === 0 ? (defaults?.native || "BNB") : "USDT";
+  return { mintPriceRaw, tokenPerMintRaw, userShareBp, lpFundShareBp, lpFundRaw, lpTokenRaw, currency };
+}
+
+function applyTargetLaunchPrice() {
+  const form = deployFormEl();
+  if (!form) return;
+  const targetInput = form.elements.targetLaunchPrice;
+  const hint = $("targetLaunchPriceHint");
+  const rawValue = String(targetInput.value || "").trim();
+  if (!rawValue) { if (hint) hint.textContent = ""; return; }
+  try {
+    const targetPriceRaw = parseToken(rawValue);
+    const mintPriceRaw = parseToken(form.elements.mintPrice.value);
+    const userShareBp = percentToBp(form.elements.userMintShare.value);
+    const lpFundShareBp = percentToBp(form.elements.lpFundShare.value);
+    const lpTokenShareBp = 10000n - userShareBp;
+    if (targetPriceRaw <= 0n) throw new Error("目标开盘单价必须大于0");
+    if (mintPriceRaw <= 0n || lpFundShareBp <= 0n) throw new Error("进入流动性的资金必须大于0");
+    if (lpTokenShareBp <= 0n) throw new Error("用户拿币比例不能是100%");
+    const tokenPerMintRaw = mintPriceRaw * lpFundShareBp * 10n ** 18n / (targetPriceRaw * lpTokenShareBp);
+    if (tokenPerMintRaw <= 0n) throw new Error("目标单价过高，无法计算代币数量");
+    form.elements.tokenPerMint.value = ethers.formatUnits(tokenPerMintRaw, 18);
+    const totalRaw = parseToken(form.elements.totalSupply.value);
+    const maxMint = totalRaw / tokenPerMintRaw;
+    if (maxMint > 0n) {
+      form.elements.maxMintCount.value = maxMint.toString();
+      if (hint) { hint.textContent = "已按目标开盘单价计算Mint配置"; hint.classList.remove("error"); hint.classList.add("ok"); }
+    } else if (hint) {
+      hint.textContent = "总供应量不足以覆盖一份Mint，请先提高总供应量";
+      hint.classList.remove("ok");
+      hint.classList.add("error");
+    }
+    updateDeployHints();
+  } catch (error) {
+    if (hint) { hint.textContent = error.message || String(error); hint.classList.remove("ok"); hint.classList.add("error"); }
+  }
+}
+
 function updateDeployHints() {
   const form = deployFormEl();
   if (!form) return;
@@ -533,6 +638,13 @@ function updateDeployHints() {
   const retainedFundPerMint = price - lpFundPerMint;
   const defaults = activeNetworkDefaults();
   const currency = Number(form.elements.mintMode.value) === 0 ? (defaults?.native || "BNB") : "USDT";
+  let launchPrice = "-";
+  try {
+    const details = launchPriceDetails(form);
+    if (details.lpFundRaw > 0n && details.lpTokenRaw > 0n) launchPrice = `${formatBigIntRatio(details.lpFundRaw, details.lpTokenRaw)} ${details.currency}/枚`;
+  } catch { /* incomplete form input */ }
+  const targetCurrency = $("targetLaunchPriceCurrency");
+  if (targetCurrency) targetCurrency.textContent = `${currency}/枚`;
   renderStats("deployHints", [
     ["单次 Mint 代币数", formatNumber(perMint)],
     ["Mint 覆盖代币", formatNumber(mintedTokenPlan)],
@@ -541,7 +653,8 @@ function updateDeployHints() {
     ["每次用户获得", formatNumber(userTokensPerMint)],
     ["每次进池代币", formatNumber(lpTokensPerMint)],
     ["每次进池资金", `${formatNumber(lpFundPerMint)} ${currency}`],
-    ["每次合约留存资金", `${formatNumber(retainedFundPerMint)} ${currency}`]
+    ["每次合约留存资金", `${formatNumber(retainedFundPerMint)} ${currency}`],
+    ["预计开盘单价", launchPrice]
   ]);
 }
 
@@ -1162,6 +1275,7 @@ async function refreshAdmin() {
     buyAmountLimitEnabled, maxBuyBaseAmountPerWallet,
     buyWhitelistEnabled,
     preLaunchBuyWhitelistEnabled,
+    dividendExcludedCount, eligibleTokenDividendSupply, eligibleLPDividendSupply,
     taxesLocked, feeExemptionsLocked, pauseDisabledForever
   ] = await Promise.all([
     state.admin.owner(), state.admin.pair(), state.admin.mintMode(), state.admin.mintPrice(), state.admin.tokenPerMint(),
@@ -1173,6 +1287,7 @@ async function refreshAdmin() {
     state.admin.buyAmountLimitEnabled(), state.admin.maxBuyBaseAmountPerWallet(),
     state.admin.buyWhitelistEnabled(),
     state.admin.preLaunchBuyWhitelistEnabled(),
+    state.admin.dividendExcludedCount(), state.admin.eligibleTokenDividendSupply(), state.admin.eligibleLPDividendSupply(),
     state.admin.taxesLocked(), state.admin.feeExemptionsLocked(), state.admin.pauseDisabledForever()
   ]);
   renderStats("adminStats", [
@@ -1187,6 +1302,8 @@ async function refreshAdmin() {
     ["金额限购", buyAmountLimitEnabled ? "开启" : "关闭"], ["单钱包金额上限", `${ethers.formatUnits(maxBuyBaseAmountPerWallet, 18)} ${Number(mintMode) === 0 ? "BNB" : "USDT"}`],
     ["买入白名单", buyWhitelistEnabled ? "开启" : "关闭"],
     ["开盘前买入白名单", preLaunchBuyWhitelistEnabled ? "开启" : "关闭"],
+    ["分红排除地址记录", dividendExcludedCount], ["持币分红有效供应", ethers.formatUnits(eligibleTokenDividendSupply, 18)],
+    ["LP分红有效供应", ethers.formatUnits(eligibleLPDividendSupply, 18)],
     ["分红最低持仓", ethers.formatUnits(minTokenDividendBalance, 18)],
     ["自动分红", autoDividendEnabled ? `开启 / 每次 ${autoDividendBatchSize}` : "关闭"], ["分红地址数", dividendHolderCount],
     ["税锁定", taxesLocked ? "已锁定" : "未锁定"], ["免税锁定", feeExemptionsLocked ? "已锁定" : "未锁定"],
@@ -1243,6 +1360,8 @@ async function adminAction(action) {
     setPreLaunchBuyWhitelistEnabled: () => c.setPreLaunchBuyWhitelistEnabled(parseBool($("preLaunchBuyWhitelistEnabled").value)),
     setPreLaunchBuyWhitelist: () => c.setPreLaunchBuyWhitelist(listAddress, listValue),
     batchSetPreLaunchBuyWhitelist: () => c.batchSetPreLaunchBuyWhitelist(parseAddressList($("batchListAddresses").value), listValue),
+    setExcludedFromDividends: () => c.setExcludedFromDividends(listAddress, listValue),
+    batchSetExcludedFromDividends: () => c.batchSetExcludedFromDividends(parseAddressList($("batchListAddresses").value), listValue),
     setExcludedFromFee: () => c.setExcludedFromFee(listAddress, listValue),
     lockFeeExemptions: () => c.lockFeeExemptions(),
     setBuyTax: () => c.setBuyTax(BigInt($("buyTax").value)),
@@ -1313,9 +1432,21 @@ document.querySelectorAll("[data-action]").forEach((btn) => btn.addEventListener
 ["totalSupply", "tokenPerMint", "maxMintCount", "mintPrice", "userMintShare", "lpFundShare"].forEach((name) => {
   const field = formField(name);
   if (!field) return;
-  field.addEventListener("input", () => syncMintPlan(name));
-  field.addEventListener("change", () => syncMintPlan(name));
+  const sync = () => {
+    if (["totalSupply", "tokenPerMint", "maxMintCount"].includes(name)) {
+      const target = formField("targetLaunchPrice");
+      if (target) target.value = "";
+      const hint = $("targetLaunchPriceHint");
+      if (hint) hint.textContent = "";
+    }
+    syncMintPlan(name);
+    if (["mintPrice", "userMintShare", "lpFundShare"].includes(name) && formField("targetLaunchPrice")?.value.trim()) applyTargetLaunchPrice();
+  };
+  field.addEventListener("input", sync);
+  field.addEventListener("change", sync);
 });
+formField("targetLaunchPrice")?.addEventListener("input", applyTargetLaunchPrice);
+formField("targetLaunchPrice")?.addEventListener("change", applyTargetLaunchPrice);
 TAX_SHARE_NAMES.forEach((name) => {
   formField(name)?.addEventListener("input", (event) => syncTaxShareControls(name, event.target.value));
   taxShareNumberField(name)?.addEventListener("input", (event) => syncTaxShareControls(name, event.target.value));
@@ -1342,6 +1473,8 @@ const ERROR_TRANSLATIONS = [
   [/insufficient\s*token\s*reserve/i, "合约内代币储备不足以发放"],
   [/trading\s*not\s*open/i, "交易尚未开启"],
   [/buy\s*whitelist/i, "当前钱包不在买入白名单中"],
+  [/dividend\s*excluded/i, "当前地址已被排除分红"],
+  [/core\s*dividend\s*exclusion/i, "核心系统地址的分红排除不能取消"],
   [/buy\s*amount\s*limit/i, "超过单钱包累计买入金额限额"],
   [/buy\s*limit/i, "超过单钱包累计买入代币限额"],
   [/Pausable:\s*paused/i, "合约已暂停"],
