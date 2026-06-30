@@ -32,6 +32,7 @@ interface IPancakePairV2 {
 contract FairMintTokenV1 is ERC20, Ownable, Pausable, ReentrancyGuard {
     using SafeERC20 for IERC20;
     enum MintMode { BNB, USDT }
+    enum UserMintMode { PERCENT, FIXED }
     enum LaunchMode { MANUAL, TIME, AUTO }
     uint256 public constant DENOMINATOR = 10000;
     uint256 public constant MAX_TAX = 500;
@@ -45,7 +46,9 @@ contract FairMintTokenV1 is ERC20, Ownable, Pausable, ReentrancyGuard {
     uint256 public tokenPerMint;
     uint256 public maxMintCount;
     uint256 public mintedCount;
+    UserMintMode public userMintMode;
     uint256 public userMintShare;
+    uint256 public userMintAmount;
     uint256 public lpFundShare;
     uint256 public launchTime;
     uint256 public startTime;
@@ -111,12 +114,13 @@ contract FairMintTokenV1 is ERC20, Ownable, Pausable, ReentrancyGuard {
     event DividendClaimed(address indexed user, uint256 tokenReward, uint256 lpReward);
     event AutoDividendProcessed(uint256 processed, uint256 paid);
     modifier lockSwap() { inSwap = true; _; inSwap = false; }
-    constructor(string memory name_, string memory symbol_, uint256 totalSupply_, MintMode mintMode_, address usdtAddress_, address router_, uint256 mintPrice_, uint256 tokenPerMint_, uint256 maxMintCount_, uint256 userMintShare_, uint256 lpFundShare_, LaunchMode launchMode_, uint256 launchTime_, address marketingWallet_, address owner_, address rewardToken_, uint256 buyTax_, uint256 sellTax_, uint256 transferTax_, uint256 marketingShare_, uint256 burnShare_, uint256 lpShare_, uint256 dividendShare_, bool buyLimitEnabled_, uint256 maxBuyAmountPerWallet_, uint256 minTokenDividendBalance_, bool buyAmountLimitEnabled_, uint256 maxBuyBaseAmountPerWallet_, bool buyWhitelistEnabled_, bool preLaunchBuyWhitelistEnabled_) ERC20(name_, symbol_) Ownable(owner_) {
+    constructor(string memory name_, string memory symbol_, uint256 totalSupply_, MintMode mintMode_, address usdtAddress_, address router_, uint256 mintPrice_, uint256 tokenPerMint_, uint256 maxMintCount_, UserMintMode userMintMode_, uint256 userMintShare_, uint256 userMintAmount_, uint256 lpFundShare_, LaunchMode launchMode_, uint256 launchTime_, address marketingWallet_, address owner_, address rewardToken_, uint256 buyTax_, uint256 sellTax_, uint256 transferTax_, uint256 marketingShare_, uint256 burnShare_, uint256 lpShare_, uint256 dividendShare_, bool buyLimitEnabled_, uint256 maxBuyAmountPerWallet_, uint256 minTokenDividendBalance_, bool buyAmountLimitEnabled_, uint256 maxBuyBaseAmountPerWallet_, bool buyWhitelistEnabled_, bool preLaunchBuyWhitelistEnabled_) ERC20(name_, symbol_) Ownable(owner_) {
         require(totalSupply_ > 0, "totalSupply zero");
         require(router_ != address(0), "router zero");
         require(marketingWallet_ != address(0), "marketing zero");
         require(owner_ != address(0), "owner zero");
         require(userMintShare_ <= DENOMINATOR, "bad user share");
+        if (userMintMode_ == UserMintMode.FIXED) require(userMintAmount_ <= tokenPerMint_, "bad user amount");
         require(lpFundShare_ <= DENOMINATOR, "bad lp fund share");
         require(buyTax_ <= MAX_TAX && transferTax_ <= MAX_TAX, "buy/transfer tax > 5%");
         require(sellTax_ <= MAX_SELL_TAX, "sell tax > 100%");
@@ -132,7 +136,9 @@ contract FairMintTokenV1 is ERC20, Ownable, Pausable, ReentrancyGuard {
         mintPrice = mintPrice_;
         tokenPerMint = tokenPerMint_;
         maxMintCount = maxMintCount_;
+        userMintMode = userMintMode_;
         userMintShare = userMintShare_;
+        userMintAmount = userMintAmount_;
         lpFundShare = lpFundShare_;
         launchMode = launchMode_;
         _setLaunchTime(launchTime_);
@@ -181,7 +187,7 @@ contract FairMintTokenV1 is ERC20, Ownable, Pausable, ReentrancyGuard {
     function _mintFlow(address user, uint256 paidAmount) internal {
         require(mintEnabled, "mint disabled"); require(!hasMinted[user], "already minted"); require(mintedCount < maxMintCount, "mint full"); if (whitelistEnabled) require(whitelist[user], "not whitelisted");
         hasMinted[user] = true; mintedCount += 1;
-        uint256 userTokens = tokenPerMint * userMintShare / DENOMINATOR;
+        uint256 userTokens = userMintMode == UserMintMode.FIXED ? userMintAmount : tokenPerMint * userMintShare / DENOMINATOR;
         uint256 lpTokens = tokenPerMint - userTokens;
         uint256 lpFund = paidAmount * lpFundShare / DENOMINATOR;
         require(balanceOf(address(this)) >= tokenPerMint, "insufficient token reserve");
@@ -346,7 +352,7 @@ contract FairMintTokenV1 is ERC20, Ownable, Pausable, ReentrancyGuard {
         return success && (data.length == 0 || abi.decode(data, (bool)));
     }
     function setMintPrice(uint256 v) external onlyOwner { mintPrice = v; }
-    function setTokenPerMint(uint256 v) external onlyOwner { tokenPerMint = v; }
+    function setTokenPerMint(uint256 v) external onlyOwner { if (userMintMode == UserMintMode.FIXED) require(userMintAmount <= v, "bad user amount"); tokenPerMint = v; }
     function setMaxMintCount(uint256 v) external onlyOwner { require(v >= mintedCount, "lt minted"); maxMintCount = v; }
     function setLaunchTime(uint256 v) external onlyOwner { _setLaunchTime(v); }
     function _setLaunchTime(uint256 v) internal { launchTime = v; startTime = v; openTime = v; tradingStartTime = v; }
@@ -577,13 +583,17 @@ function formatBigIntRatio(numerator, denominator, precision = 30) {
 function launchPriceDetails(form) {
   const mintPriceRaw = parseToken(form.elements.mintPrice.value);
   const tokenPerMintRaw = parseToken(form.elements.tokenPerMint.value);
+  const userMintMode = Number(form.elements.userMintMode.value);
   const userShareBp = percentToBp(form.elements.userMintShare.value);
+  const userMintAmountRaw = parseToken(form.elements.userMintAmount.value);
   const lpFundShareBp = percentToBp(form.elements.lpFundShare.value);
   const lpFundRaw = mintPriceRaw * lpFundShareBp / 10000n;
-  const lpTokenRaw = tokenPerMintRaw * (10000n - userShareBp) / 10000n;
+  const userTokenRaw = userMintMode === 1 ? userMintAmountRaw : tokenPerMintRaw * userShareBp / 10000n;
+  if (userTokenRaw > tokenPerMintRaw) throw new Error("用户到账数量不能大于单次 Mint 代币数");
+  const lpTokenRaw = tokenPerMintRaw - userTokenRaw;
   const defaults = activeNetworkDefaults();
   const currency = Number(form.elements.mintMode.value) === 0 ? (defaults?.native || "BNB") : "USDT";
-  return { mintPriceRaw, tokenPerMintRaw, userShareBp, lpFundShareBp, lpFundRaw, lpTokenRaw, currency };
+  return { mintPriceRaw, tokenPerMintRaw, userMintMode, userShareBp, userMintAmountRaw, userTokenRaw, lpFundShareBp, lpFundRaw, lpTokenRaw, currency };
 }
 
 function applyTargetLaunchPrice() {
@@ -596,13 +606,18 @@ function applyTargetLaunchPrice() {
   try {
     const targetPriceRaw = parseToken(rawValue);
     const mintPriceRaw = parseToken(form.elements.mintPrice.value);
+    const userMintMode = Number(form.elements.userMintMode.value);
     const userShareBp = percentToBp(form.elements.userMintShare.value);
+    const userMintAmountRaw = parseToken(form.elements.userMintAmount.value);
     const lpFundShareBp = percentToBp(form.elements.lpFundShare.value);
     const lpTokenShareBp = 10000n - userShareBp;
     if (targetPriceRaw <= 0n) throw new Error("目标开盘单价必须大于0");
     if (mintPriceRaw <= 0n || lpFundShareBp <= 0n) throw new Error("进入流动性的资金必须大于0");
-    if (lpTokenShareBp <= 0n) throw new Error("用户拿币比例不能是100%");
-    const tokenPerMintRaw = mintPriceRaw * lpFundShareBp * 10n ** 18n / (targetPriceRaw * lpTokenShareBp);
+    if (userMintMode === 0 && lpTokenShareBp <= 0n) throw new Error("用户拿币比例不能是100%");
+    const lpTokenRaw = mintPriceRaw * lpFundShareBp * 10n ** 18n / (targetPriceRaw * 10000n);
+    const tokenPerMintRaw = userMintMode === 1
+      ? lpTokenRaw + userMintAmountRaw
+      : mintPriceRaw * lpFundShareBp * 10n ** 18n / (targetPriceRaw * lpTokenShareBp);
     if (tokenPerMintRaw <= 0n) throw new Error("目标单价过高，无法计算代币数量");
     form.elements.tokenPerMint.value = ethers.formatUnits(tokenPerMintRaw, 18);
     const totalRaw = parseToken(form.elements.totalSupply.value);
@@ -628,11 +643,13 @@ function updateDeployHints() {
   const perMint = Number(form.elements.tokenPerMint.value || 0);
   const maxMint = Number(form.elements.maxMintCount.value || 0);
   const price = Number(form.elements.mintPrice.value || 0);
+  const userMintMode = Number(form.elements.userMintMode.value || 0);
   const userShare = Number(form.elements.userMintShare.value || 0);
+  const userMintAmount = Number(form.elements.userMintAmount.value || 0);
   const lpFundShare = Number(form.elements.lpFundShare.value || 0);
   const mintedTokenPlan = perMint * maxMint;
   const remaining = total - mintedTokenPlan;
-  const userTokensPerMint = perMint * userShare / 100;
+  const userTokensPerMint = userMintMode === 1 ? userMintAmount : perMint * userShare / 100;
   const lpTokensPerMint = perMint - userTokensPerMint;
   const lpFundPerMint = price * lpFundShare / 100;
   const retainedFundPerMint = price - lpFundPerMint;
@@ -688,6 +705,29 @@ function syncMintPlan(changedName) {
     maxMintInput.value = String(Math.floor(total / perMint));
   }
   updateDeployHints();
+}
+
+function updateUserMintModeUI() {
+  const form = deployFormEl();
+  if (!form) return;
+  const fixedMode = Number(form.elements.userMintMode.value) === 1;
+  const shareInput = form.elements.userMintShare;
+  const amountInput = form.elements.userMintAmount;
+  shareInput.disabled = fixedMode;
+  shareInput.required = !fixedMode;
+  amountInput.disabled = !fixedMode;
+  amountInput.required = fixedMode;
+  amountInput.setCustomValidity("");
+  if (fixedMode) {
+    try {
+      if (parseToken(amountInput.value) > parseToken(form.elements.tokenPerMint.value)) {
+        amountInput.setCustomValidity("用户到账数量不能大于单次 Mint 代币数");
+      }
+    } catch { /* native form validation handles incomplete values */ }
+  }
+  const target = form.elements.targetLaunchPrice.value.trim();
+  if (target) applyTargetLaunchPrice();
+  else updateDeployHints();
 }
 
 function parseAddressList(value) {
@@ -999,7 +1039,9 @@ function deployArgs(form) {
     parseToken(fd.get("mintPrice")),
     parseToken(fd.get("tokenPerMint")),
     BigInt(fd.get("maxMintCount")),
+    Number(fd.get("userMintMode")),
     percentToBp(fd.get("userMintShare")),
+    parseToken(fd.get("userMintAmount")),
     percentToBp(fd.get("lpFundShare")),
     Number(fd.get("launchMode")),
     BigInt(launchTime),
@@ -1429,7 +1471,7 @@ $("loadAdmin").addEventListener("click", async (e) => run(e.currentTarget, async
 $("refreshAdmin").addEventListener("click", async (e) => run(e.currentTarget, refreshAdmin));
 document.querySelectorAll("[data-action]").forEach((btn) => btn.addEventListener("click", async () => run(btn, () => adminAction(btn.dataset.action))));
 
-["totalSupply", "tokenPerMint", "maxMintCount", "mintPrice", "userMintShare", "lpFundShare"].forEach((name) => {
+["totalSupply", "tokenPerMint", "maxMintCount", "mintPrice", "userMintShare", "userMintAmount", "lpFundShare"].forEach((name) => {
   const field = formField(name);
   if (!field) return;
   const sync = () => {
@@ -1440,6 +1482,7 @@ document.querySelectorAll("[data-action]").forEach((btn) => btn.addEventListener
       if (hint) hint.textContent = "";
     }
     syncMintPlan(name);
+    if (["tokenPerMint", "userMintAmount"].includes(name)) updateUserMintModeUI();
     if (["mintPrice", "userMintShare", "lpFundShare"].includes(name) && formField("targetLaunchPrice")?.value.trim()) applyTargetLaunchPrice();
   };
   field.addEventListener("input", sync);
@@ -1447,6 +1490,7 @@ document.querySelectorAll("[data-action]").forEach((btn) => btn.addEventListener
 });
 formField("targetLaunchPrice")?.addEventListener("input", applyTargetLaunchPrice);
 formField("targetLaunchPrice")?.addEventListener("change", applyTargetLaunchPrice);
+formField("userMintMode")?.addEventListener("change", updateUserMintModeUI);
 TAX_SHARE_NAMES.forEach((name) => {
   formField(name)?.addEventListener("input", (event) => syncTaxShareControls(name, event.target.value));
   taxShareNumberField(name)?.addEventListener("input", (event) => syncTaxShareControls(name, event.target.value));
@@ -1459,7 +1503,7 @@ window.ethereum?.on?.("chainChanged", () => {
   state.network = null;
   connectWallet().catch((err) => log(err.shortMessage || err.message || String(err)));
 });
-updateDeployHints();
+updateUserMintModeUI();
 syncTaxShareControls();
 
 const ERROR_TRANSLATIONS = [
