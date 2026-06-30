@@ -98,6 +98,8 @@ button:hover { border-color: var(--gold); }
 button:disabled { opacity: .55; cursor: wait; }
 .primary { background: var(--gold); color: #000; border-color: var(--gold); }
 .secondary { background: transparent; }
+.danger { background: var(--danger); color: #160303; border-color: var(--danger); }
+.danger:hover { border-color: #fff; }
 .tab { text-align: left; }
 .tab.active { border-color: var(--gold); color: var(--gold); background: var(--gold-dim); }
 .wide { grid-column: 1 / -1; }
@@ -305,6 +307,9 @@ input[type="range"] {
 article > button {
   margin: 0 8px 10px 0;
 }
+
+.danger-zone { border-color: color-mix(in srgb, var(--danger) 55%, var(--line)); }
+.danger-note { color: var(--danger); font-size: 13px; margin: 0 0 12px; }
 
 .downloads {
   margin-top: 18px;

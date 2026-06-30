@@ -4,8 +4,8 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>GOLDLAUNCH 发射台</title>
-    <link rel="stylesheet" href="./styles.css" />
-    <script type="module" src="./app.js?v=20260630-user-mint-mode"></script>
+    <link rel="stylesheet" href="./styles.css?v=20260630-renounce-owner" />
+    <script type="module" src="./app.js?v=20260630-renounce-owner"></script>
   </head>
   <body>
     <div class="shell">
@@ -235,6 +235,12 @@
               <div class="row"><input id="withdrawTokenAddress" placeholder="代币地址" /><input id="withdrawTokenAmount" placeholder="数量，空为全部" /><button data-action="withdrawToken">提取代币</button></div>
               <div class="row"><input id="withdrawDividendReserveAmount" placeholder="分红储备数量，空为全部" /><button data-action="withdrawDividendReserve">提取分红储备</button></div>
               <div class="row"><input id="withdrawLPAmount" placeholder="LP 数量，空为全部" /><button data-action="withdrawLP">提取 LP</button></div>
+            </article>
+
+            <article class="danger-zone">
+              <h3>永久丢弃管理员权限</h3>
+              <p class="danger-note">不可恢复，仅允许在交易已经开启后操作。</p>
+              <div class="row"><input id="renounceConfirmation" autocomplete="off" placeholder="输入 RENOUNCE 确认" /><button class="danger" data-action="renounceOwnership">永久丢弃权限</button></div>
             </article>
           </div>
         </section>
