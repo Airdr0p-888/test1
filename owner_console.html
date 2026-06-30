@@ -6,6 +6,14 @@
 <title>Owner 通用管理控制台</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://cdn.jsdelivr.net/npm/ethers@6.7.1/dist/ethers.umd.min.js"></script>
+<script>
+// 备用 CDN 加载
+try {
+  if (typeof ethers === 'undefined') {
+    document.write('<script src="https://unpkg.com/ethers@6.7.1/dist/ethers.umd.min.js"><\/script>');
+  }
+} catch (e) {}
+</script>
 <style>
   :root { --gold: #D4A017; --gold-dim: #B8860B; --dark: #0A0A0A; --dark2: #111; --dark3: #1a1a1a; }
   body { background: #050505; color: #e0e0e0; font-family: 'Segoe UI', system-ui, sans-serif; }
@@ -347,6 +355,10 @@ function getVaultAbi() {
 async function connectWallet() {
   try {
     if (!window.ethereum) { alert('请安装 MetaMask'); return; }
+    if (typeof ethers === 'undefined') {
+      log('Ethers.js 未加载，请刷新页面重试', 'error');
+      return;
+    }
     log('请求连接钱包...');
 
     provider = new ethers.BrowserProvider(window.ethereum);
@@ -744,6 +756,24 @@ if (window.ethereum) {
 // 初始化默认值
 document.getElementById('withdrawTo').value = '';
 log('页面已加载。请连接钱包并加载合约。', 'info');
+
+// 检测 ethers 是否加载成功
+function checkEthersLoaded() {
+  if (typeof ethers === 'undefined') {
+    log('错误: Ethers.js 库未能加载，请检查网络连接或刷新页面重试', 'error');
+    document.getElementById('connectBtn').textContent = 'Ethers 未加载';
+    document.getElementById('connectBtn').disabled = true;
+    return false;
+  }
+  return true;
+}
+
+// 页面加载完成后检测
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', checkEthersLoaded);
+} else {
+  checkEthersLoaded();
+}
 </script>
 </body>
 </html>
